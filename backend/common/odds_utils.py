@@ -5,6 +5,7 @@ from agents.odds_agent.models import GameOdds, OddsResponse, Moneyline
 from common.config_loader import ODDS_API_KEY, ODDS_REGIONS, ODDS_MARKETS, ODDS_BOOKMAKERS, TZ
 from common.api_headers import get_json
 
+# ------------------ Conversion Helpers ------------------
 def to_american(decimal_price: float) -> int:
     """Convert decimal odds to American odds."""
     if decimal_price >= 2.0:
@@ -12,6 +13,7 @@ def to_american(decimal_price: float) -> int:
     else:
         return int(-100 / (decimal_price - 1))
 
+# ------------------ Core Odds Fetcher ------------------
 def fetch_moneyline_odds(filter_date: str | None = None) -> OddsResponse:
     """
     Fetch NBA Moneyline odds.
@@ -91,3 +93,20 @@ def fetch_moneyline_odds(filter_date: str | None = None) -> OddsResponse:
         )
 
     return OddsResponse(date=filter_date or today_str, games=games)
+
+# ------------------ Convenience Wrapper ------------------
+def get_todays_odds() -> dict:
+    """
+    Safe helper for fetching today's odds.
+    Returns a plain dict structure so higher layers can use `.get()` safely.
+    """
+    try:
+        tz = pytz.timezone(TZ)
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        odds_response = fetch_moneyline_odds(filter_date=today_str)
+        # If OddsResponse (Pydantic model), convert to dict
+        if hasattr(odds_response, "model_dump"):
+            return odds_response.model_dump()
+        return odds_response
+    except Exception as e:
+        return {"error": str(e), "games": []}

@@ -14,22 +14,25 @@ from services.openai_service import generate_narrative_summary
 router = APIRouter(prefix="/nba/narrative", tags=["Narrative"])
 
 @router.get("/today")
-def get_daily_narrative(
-    mode: str = Query("template", description="template or ai")
-):
-    """
-    Generate the daily NBA narrative summary.
-    Combines player trends, team trends, player props, and odds.
-    """
+def get_daily_narrative(mode: str = Query("template", description="template or ai")):
+    """Generate the daily NBA narrative summary."""
     try:
-        # --- 1. Collect data ---
-        trends = get_trends_summary()
-        team_trends = trends.team_trends
-        player_trends = trends.player_trends
-        props = fetch_player_stats(team_id=134)  # Lakers for demo
-        odds = fetch_moneyline_odds()
+        try:
+            trends = get_trends_summary()
+            team_trends, player_trends = trends.team_trends, trends.player_trends
+        except Exception:
+            team_trends, player_trends = [], []
 
-        # --- 2. Build structured payload ---
+        try:
+            props = fetch_player_stats(team_id=134)  # Lakers for demo
+        except Exception:
+            props = {"data": []}
+
+        try:
+            odds = fetch_moneyline_odds()
+        except Exception:
+            odds = {"games": []}
+
         narrative_data = {
             "date_generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "player_trends": [p.model_dump() for p in player_trends],
@@ -38,14 +41,8 @@ def get_daily_narrative(
             "odds": odds.model_dump() if isinstance(odds, OddsResponse) else odds,
         }
 
-        # --- 3. Generate output ---
         summary = generate_narrative_summary(narrative_data, mode=mode)
-        return {
-            "ok": True,
-            "summary": summary,
-            "raw": narrative_data,
-            "mode": mode,
-        }
+        return {"ok": True, "summary": summary, "raw": narrative_data, "mode": mode}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

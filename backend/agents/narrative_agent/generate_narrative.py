@@ -1,7 +1,6 @@
 # backend/agents/narrative_agent/generate_narrative.py
 from __future__ import annotations
-import os, sys, requests
-import random
+import os, sys, requests, random
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 from openai import OpenAI
@@ -10,6 +9,8 @@ from openai import OpenAI
 BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
 if BACKEND_ROOT not in sys.path:
     sys.path.insert(0, BACKEND_ROOT)
+
+from common.odds_utils import get_todays_odds  # ✅ Proper import
 
 BASE_URL = "http://127.0.0.1:8000"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -40,14 +41,10 @@ def summarize_trends(trends: Dict[str, Any]) -> List[str]:
     lines = []
     for p in trends.get("player_trends", []):
         arrow = "↑" if p["trend_direction"] == "up" else "↓" if p["trend_direction"] == "down" else "→"
-        lines.append(
-            f"{p['player_name']} {arrow} {p['stat_type']} avg {p['average']:.1f} ({p['trend_direction']})."
-        )
+        lines.append(f"{p['player_name']} {arrow} {p['stat_type']} avg {p['average']:.1f} ({p['trend_direction']}).")
     for t in trends.get("team_trends", []):
         arrow = "↑" if t["trend_direction"] == "up" else "↓" if t["trend_direction"] == "down" else "→"
-        lines.append(
-            f"{t['team_name']} {arrow} trend on {t['stat_type']} ({t['average']} avg)."
-        )
+        lines.append(f"{t['team_name']} {arrow} trend on {t['stat_type']} ({t['average']} avg).")
     return lines
 
 
@@ -109,12 +106,8 @@ def enhance_with_gpt(summary_text: str) -> str:
 
 
 # ----------------------- Public API -----------------------
-def generate_daily_narrative():
-    """
-    Gathers player trends, team stats, odds,
-    and now auto-injects mock player props.
-    """
-
+def generate_daily_narrative() -> Dict[str, Any]:
+    """Generate structured narrative data for use by the main /narrative route."""
     player_trends = [
         {"player_name": "LeBron James", "stat_type": "points", "average": 25.4, "trend_direction": "up"},
         {"player_name": "Stephen Curry", "stat_type": "points", "average": 27.1, "trend_direction": "up"},
@@ -126,141 +119,66 @@ def generate_daily_narrative():
         {"team_name": "Boston Celtics", "stat_type": "assists", "average": 98.7, "trend_direction": "neutral"},
     ]
 
-    # --- 🔥 Inject sample player props ---
     mock_props = [
-        {
-            "player_name": "Stephen Curry",
-            "team": "Warriors",
-            "prop_type": "points",
-            "line": 29.5,
-            "odds_over": -115,
-            "odds_under": -105,
-            "trend_last5_over": random.randint(2, 5),
-        },
-        {
-            "player_name": "LeBron James",
-            "team": "Lakers",
-            "prop_type": "rebounds",
-            "line": 8.5,
-            "odds_over": -110,
-            "odds_under": -110,
-            "trend_last5_over": random.randint(2, 5),
-        },
-        {
-            "player_name": "Luka Doncic",
-            "team": "Mavericks",
-            "prop_type": "assists",
-            "line": 10.5,
-            "odds_over": -120,
-            "odds_under": 100,
-            "trend_last5_over": random.randint(2, 5),
-        },
+        {"player_name": "Stephen Curry", "team": "Warriors", "prop_type": "points", "line": 29.5,
+         "odds_over": -115, "odds_under": -105, "trend_last5_over": random.randint(2, 5)},
+        {"player_name": "LeBron James", "team": "Lakers", "prop_type": "rebounds", "line": 8.5,
+         "odds_over": -110, "odds_under": -110, "trend_last5_over": random.randint(2, 5)},
+        {"player_name": "Luka Doncic", "team": "Mavericks", "prop_type": "assists", "line": 10.5,
+         "odds_over": -120, "odds_under": 100, "trend_last5_over": random.randint(2, 5)},
     ]
 
-    odds = get_todays_odds()  # your current odds integration
+    try:
+        odds = get_todays_odds()
+    except Exception:
+        odds = {"games": []}
 
-    # --- 🛡️ New: Defensive matchup context ---
     defensive_matchups = [
-        {
-            "team_name": "Charlotte Hornets",
-            "def_rank_vs_guards": 28,
-            "def_rank_vs_forwards": 18,
-            "def_rank_vs_centers": 22,
-        },
-        {
-            "team_name": "Milwaukee Bucks",
-            "def_rank_vs_guards": 7,
-            "def_rank_vs_forwards": 4,
-            "def_rank_vs_centers": 10,
-        },
-        {
-            "team_name": "Washington Wizards",
-            "def_rank_vs_guards": 30,
-            "def_rank_vs_forwards": 25,
-            "def_rank_vs_centers": 27,
-        },
+        {"team_name": "Charlotte Hornets", "def_rank_vs_guards": 28, "def_rank_vs_forwards": 18, "def_rank_vs_centers": 22},
+        {"team_name": "Milwaukee Bucks", "def_rank_vs_guards": 7, "def_rank_vs_forwards": 4, "def_rank_vs_centers": 10},
+        {"team_name": "Washington Wizards", "def_rank_vs_guards": 30, "def_rank_vs_forwards": 25, "def_rank_vs_centers": 27},
     ]
 
-    # --- 🧩 Cross-Trend Analysis ---
     cross_trends = []
     for p in player_trends:
-        name = p["player_name"]
-        stat = p["stat_type"]
-        direction = p["trend_direction"]
-
+        name, stat, direction = p["player_name"], p["stat_type"], p["trend_direction"]
         if direction == "up":
-            cross_trends.append(f"{name} trending upward in {stat}, aligning with offensive improvements for his team.")
+            cross_trends.append(f"{name} trending upward in {stat}, aligning with team improvements.")
         elif direction == "down":
-            cross_trends.append(f"{name} trending downward in {stat}, which may limit team scoring potential.")
+            cross_trends.append(f"{name} trending downward in {stat}, potential dip in production.")
         else:
             cross_trends.append(f"{name} showing steady {stat} performance, maintaining consistency.")
-
     for team in team_trends:
         tname = team["team_name"]
         if team["trend_direction"] == "up":
-            cross_trends.append(f"{tname} trending up offensively — may sustain strong performance if defense holds.")
+            cross_trends.append(f"{tname} trending up offensively — may sustain performance if defense holds.")
         elif team["trend_direction"] == "down":
             cross_trends.append(f"{tname} facing offensive slowdown — could signal regression risk.")
 
-    # --- 🧮 Micro-Summary ---
-    risk_score = round(random.uniform(5.0, 9.5), 1)
-# --- 🧩 Cross-Trend Analysis ---
-    cross_trends = []
-    for p in player_trends:
-        name = p["player_name"]
-        stat = p["stat_type"]
-        direction = p["trend_direction"]
-
-        if direction == "up":
-            cross_trends.append(f"{name} trending upward in {stat}, aligning with offensive improvements for his team.")
-        elif direction == "down":
-            cross_trends.append(f"{name} trending downward in {stat}, which may limit team scoring potential.")
-        else:
-            cross_trends.append(f"{name} showing steady {stat} performance, maintaining consistency.")
-
-    for team in team_trends:
-        tname = team["team_name"]
-        if team["trend_direction"] == "up":
-            cross_trends.append(f"{tname} trending up offensively — may sustain strong performance if defense holds.")
-        elif team["trend_direction"] == "down":
-            cross_trends.append(f"{tname} facing offensive slowdown — could signal regression risk.")
-
-    # --- 🧮 Automated Value Tagging ---
     def map_value_label(score: float) -> str:
-        if score >= 8.0:
-            return "High Value"
-        elif score >= 6.0:
-            return "Moderate"
+        if score >= 8.0: return "High Value"
+        elif score >= 6.0: return "Moderate"
         return "Low"
 
     key_edges = []
     for text in cross_trends[:5]:
         edge_score = round(random.uniform(5.0, 9.5), 1)
-        key_edges.append({
-            "text": text,
-            "edge_score": edge_score,
-            "value_label": map_value_label(edge_score)
-        })
+        key_edges.append({"text": text, "edge_score": edge_score, "value_label": map_value_label(edge_score)})
 
     risk_score = round(sum(edge["edge_score"] for edge in key_edges) / len(key_edges), 1)
 
-    micro_summary = {
-        "key_edges": key_edges,
-        "risk_score": risk_score
-    }
-
+    micro_summary = {"key_edges": key_edges, "risk_score": risk_score}
 
     return {
-        "date_generated": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        "date_generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "player_trends": player_trends,
         "team_trends": team_trends,
         "player_props": mock_props,
         "defensive_matchups": defensive_matchups,
         "odds": odds,
-        "micro_summary": micro_summary,  # 👈 new structured insight layer
+        "micro_summary": micro_summary,
     }
 
 
 if __name__ == "__main__":
-    data = generate_daily_narrative(mode="template")
-    print(data["summary"])
+    print(generate_daily_narrative())
