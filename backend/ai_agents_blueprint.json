@@ -1,0 +1,109 @@
+{
+  "project": "AI Betting Agent System",
+  "description": "Multi-agent AI system that mimics and enhances human betting research for NBA analysis.",
+  "version": "1.0",
+  "frontend": "React",
+  "backend": "Python (FastAPI)",
+  "ai_model": "GPT-4o-mini (or custom fine-tuned model later)",
+  "agents": [
+    {
+      "name": "OddsAgent",
+      "goal": "Fetch and normalize NBA odds, moneylines, spreads, and totals from betting APIs.",
+      "inputs": ["sport_key", "region", "market_type (moneyline/spread/total)"],
+      "outputs": ["team", "odds_decimal", "odds_american", "bookmaker", "timestamp"],
+      "data_source": ["The Odds API"],
+      "dependencies": [],
+      "status": "✅ active"
+    },
+    {
+      "name": "TeamOffenseAgent",
+      "goal": "Rank NBA teams by offensive metrics (overall and by position).",
+      "inputs": ["team_name", "season", "split_type (overall, PG, SG, etc.)"],
+      "outputs": ["offensive_rating", "points_per_possession", "rank_by_position"],
+      "data_source": ["NBA Stats API", "Basketball Reference", "StatMuse"],
+      "dependencies": ["OddsAgent"],
+      "status": "🔜 planned"
+    },
+    {
+      "name": "TeamDefenseAgent",
+      "goal": "Rank NBA teams defensively overall and by position, including vs. specific stats (points, assists, rebounds, threes).",
+      "inputs": ["team_name", "position", "season", "metric"],
+      "outputs": ["defensive_rating", "rank_vs_position", "stat_allowed_per_game"],
+      "data_source": ["NBA Stats API", "TeamRankings.com", "StatMuse"],
+      "dependencies": ["OddsAgent"],
+      "status": "🔜 planned"
+    },
+    {
+      "name": "PlayerVsTeamAgent",
+      "goal": "Analyze how individual players perform against specific teams (points, rebounds, assists, threes).",
+      "inputs": ["player_name", "opponent_team", "season", "split (home/away)"],
+      "outputs": ["avg_pts", "avg_ast", "avg_reb", "avg_3pm", "games_played"],
+      "data_source": ["NBA Stats API", "StatMuse"],
+      "dependencies": ["TeamDefenseAgent"],
+      "status": "🔜 planned"
+    },
+    {
+      "name": "PlayerVsPlayerAgent",
+      "goal": "Compare player head-to-head matchups — how Player A performs against Player B.",
+      "inputs": ["player_a", "player_b", "season"],
+      "outputs": ["offensive_efficiency", "defensive_rating_vs", "fg_percent_vs"],
+      "data_source": ["NBA Advanced Matchup Data (Second Spectrum)", "StatMuse"],
+      "dependencies": ["PlayerVsTeamAgent"],
+      "status": "🔜 planned"
+    },
+    {
+      "name": "SynergyAgent",
+      "goal": "Measure how players perform together — on/off court synergy metrics.",
+      "inputs": ["player_name", "teammate_name", "season"],
+      "outputs": ["usage_diff", "assist_rate_change", "plus_minus_diff"],
+      "data_source": ["NBA Lineup Data (NBA.com/stats)", "PBPStats.com"],
+      "dependencies": ["PlayerVsTeamAgent", "PlayerVsPlayerAgent"],
+      "status": "🔜 planned"
+    },
+    {
+      "name": "PositionSplitsAgent",
+      "goal": "Summarize positional splits vs top/bottom 10 defenses by stat type.",
+      "inputs": ["position", "defense_rank_category (top10/bottom10)", "stat_type (PTS/REB/AST/3PM)"],
+      "outputs": ["avg_stat_value", "percent_diff_from_avg"],
+      "data_source": ["NBA Stats API", "TeamRankings.com"],
+      "dependencies": ["TeamDefenseAgent"],
+      "status": "🔜 planned"
+    },
+    {
+      "name": "VenueAgent",
+      "goal": "Track player and team performance at home vs on the road.",
+      "inputs": ["player_name", "team_name", "split_type (home/away)"],
+      "outputs": ["home_avg_pts", "road_avg_pts", "variance"],
+      "data_source": ["NBA Stats API", "StatMuse"],
+      "dependencies": ["PlayerVsTeamAgent"],
+      "status": "🔜 planned"
+    },
+    {
+      "name": "TrendsAgent",
+      "goal": "Analyze rolling averages, minutes-weighted stats, and TD/DD trends over recent games.",
+      "inputs": ["player_name", "stat_type", "num_games"],
+      "outputs": ["rolling_avg", "trend_direction", "minutes_weighted_avg", "dd_td_prob"],
+      "data_source": ["NBA Stats API", "Basketball Reference"],
+      "dependencies": ["PlayerVsTeamAgent", "VenueAgent"],
+      "status": "🔜 next"
+    },
+    {
+      "name": "SimulationAgent",
+      "goal": "Run Monte Carlo simulations on game or player prop outcomes using aggregated agent data.",
+      "inputs": ["player_name", "stat_type", "team_matchup", "historical_data"],
+      "outputs": ["simulated_outcome_distribution", "probability_above_threshold", "fair_odds"],
+      "data_source": ["Internal data (all agents)"],
+      "dependencies": ["OddsAgent", "TrendsAgent", "TeamDefenseAgent", "TeamOffenseAgent"],
+      "status": "🔜 planned"
+    },
+    {
+      "name": "OrchestratorAgent",
+      "goal": "Combine and reason over outputs from all agents to produce smart betting insights and recommendations.",
+      "inputs": ["game", "player", "prop_type"],
+      "outputs": ["natural_language_summary", "recommendation_score", "confidence"],
+      "data_source": ["All agents"],
+      "dependencies": ["OddsAgent", "TrendsAgent", "SimulationAgent"],
+      "status": "🔜 planned"
+    }
+  ]
+}

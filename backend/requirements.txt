@@ -1,0 +1,14 @@
+# --- Core Backend ---
+fastapi==0.120.0
+uvicorn==0.38.0
+pydantic==2.12.3
+requests==2.32.5
+
+# --- Data / JSON ---
+python-dotenv==1.0.1
+
+# --- Optional (if you use them) ---
+httpx==0.27.2           # async HTTP calls
+pandas==2.2.3           # data manipulation
+numpy==2.1.3            # math ops if used in analytics
+aiofiles==24.1.0        # async file handling (common in FastAPI)
