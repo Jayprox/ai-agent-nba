@@ -1,100 +1,263 @@
 # backend/services/openai_service.py
 from __future__ import annotations
-import os, json
-from datetime import datetime
-from openai import OpenAI
-from services.narrative_refiner import refine_narrative_output
+import json
+import logging
+import os
+import re
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+logger = logging.getLogger("openai_service")
+logger.setLevel(logging.WARNING)
 
+LOG_AI_RAW = os.getenv("LOG_AI_RAW", "0") == "1"
 
-def generate_narrative_summary(narrative_data: dict, mode: str = "template") -> dict:
-    """
-    Generates + refines the daily NBA narrative.
-    Now includes optional Player Prop section.
-    """
+# Import conditionally so environments without the package still work.
+try:
+    from openai import OpenAI  # type: ignore
+except Exception as _imp_err:  # pragma: no cover
+    OpenAI = None  # type: ignore
+    _IMPORT_ERROR = _imp_err
+else:
+    _IMPORT_ERROR = None
 
-    if mode == "template":
-        date_str = datetime.utcnow().strftime("%B %d, %Y")
-        player_trends = narrative_data.get("player_trends", [])
-        team_trends = narrative_data.get("team_trends", [])
-        odds = narrative_data.get("odds", {}).get("games", [])
-        props = narrative_data.get("player_props", [])
+AI_NARRATIVE_PROMPT = """
+You are a professional NBA data journalist with access to live stats and betting odds.
 
-        summary = f"**NBA Update — {date_str}**\n\nWelcome to today’s NBA roundup!\n\n"
+Using the JSON data below, write a polished multi-layer report for today’s NBA slate.
 
-        if player_trends:
-            summary += "**Key Player Trends:**\n\n"
-            for p in player_trends[:3]:
-                arrow = "↑" if p["trend_direction"] == "up" else "↓" if p["trend_direction"] == "down" else "→"
-                summary += f"- **{p['player_name']}** {arrow} {p['stat_type']} avg {p['average']:.1f}\n"
-            summary += "\n"
+JSON Input:
+<<JSON_INPUT>>
 
-        if team_trends:
-            summary += "**Team Performance:**\n\n"
-            for t in team_trends[:2]:
-                summary += f"- {t['team_name']} {t['trend_direction']} on {t['stat_type']} ({t['average']:.1f} avg)\n"
-            summary += "\n"
+Instructions:
+1) Macro Summary — 2–3 paragraphs summarizing key player & team trends.
+2) Micro Summary — 3–5 key betting/performance insights (use player_props or micro_summary if present).
+3) Analyst Takeaway — 1 short paragraph with a prediction or notable continuation.
+4) Tone — professional, analytical, fan-friendly (sports media style).
+5) Output strictly as a SINGLE JSON object with EXACT keys:
 
-        if props:
-            summary += "**Player Props Watch:**\n\n"
-            for pr in props[:3]:
-                summary += (
-                    f"- {pr['player_name']} ({pr['prop_type']}) line {pr['line']} "
-                    f"(O:{pr['odds_over']}, U:{pr['odds_under']}) – "
-                    f"Over in {pr['trend_last5_over']}/5 recent games\n"
-                )
-            summary += "\n"
-
-        if odds:
-            summary += "**Top Odds Matchups:**\n\n"
-            for g in odds[:3]:
-                summary += (
-                    f"- {g['away_team']} @ {g['home_team']} — "
-                    f"{g['home_team']} favored "
-                    f"({g['moneyline']['home']['american']}/{g['moneyline']['away']['american']})\n"
-                )
-
-        return refine_narrative_output(summary.strip(), narrative_data, tone="neutral")
-
-    # --- AI Mode ---
-    elif mode == "ai":
-        prompt = f"""
-You are an expert NBA betting analyst.
-Analyze the following JSON dataset and craft a 2–3 paragraph daily report.
-
-JSON Data:
-{json.dumps(narrative_data, indent=2)}
-
-Cover these sections:
-1️⃣ **Player Performance Trends** – increases/decreases in points, assists, rebounds.  
-2️⃣ **Team Trends** – key offensive/defensive shifts.  
-3️⃣ **Matchup Context** – favored teams, close spreads, or underdog angles.  
-4️⃣ **Player Props Watch** – mention notable prop lines (if provided) and whether recent form supports Over or Under.  
-5️⃣ **Matchup Context** – integrate defensive matchup data (e.g., team defensive ranks vs guards/forwards/centers) to explain how it might influence player or team outcomes.
-6️⃣ **Cross-Trend Insights** – connect player and team trajectories. Highlight synergy (e.g., upward player + weak opponent defense) or conflict (e.g., hot player vs elite defense).
-7️⃣ **Micro Summary JSON** – summarize top 3–5 actionable insights as compact takeaways. Reference `micro_summary` for `key_edges` and `risk_score`.
-
-
-
-Tone = professional analyst, concise (< 250 words).
+{
+  "macro_summary": "<string>",
+  "micro_summary": {
+    "key_edges": [{"text": "<string>", "edge_score": <float>, "value_label": "<string>"}],
+    "risk_score": <float>
+  },
+  "analyst_takeaway": "<string>",
+  "confidence_summary": ["High","Medium","Low"],
+  "metadata": {
+    "generated_at": "<ISO-8601-UTC>",
+    "model": "gpt-4o"
+  }
+}
 """
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _coerce_schema(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure required keys exist with sane defaults."""
+    out: Dict[str, Any] = dict(parsed) if isinstance(parsed, dict) else {}
+    out.setdefault("macro_summary", "Missing field: macro_summary")
+    micro = out.get("micro_summary")
+    if not isinstance(micro, dict):
+        micro = {}
+    micro.setdefault("key_edges", [])
+    micro.setdefault("risk_score", 0.0)
+    out["micro_summary"] = micro
+    out.setdefault("analyst_takeaway", "Missing field: analyst_takeaway")
+    cs = out.get("confidence_summary")
+    if not isinstance(cs, list):
+        cs = []
+    out["confidence_summary"] = cs
+    meta = out.get("metadata")
+    if not isinstance(meta, dict):
+        meta = {}
+    meta.setdefault("generated_at", _now_iso())
+    meta.setdefault("model", "gpt-4o")
+    out["metadata"] = meta
+    return out
+
+def _extract_json_anywhere(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Try multiple strategies to extract JSON:
+      1) Strip code fences
+      2) Take the widest {...} block
+      3) As a last resort, attempt to parse the whole thing
+    """
+    if not text:
+        return None
+
+    # Remove code fences ```json ... ``` or ``` ... ```
+    fenced = re.sub(r"```(?:json)?\s*([\s\S]*?)```", r"\1", text, flags=re.IGNORECASE)
+
+    # Prefer the widest JSON object region
+    start = fenced.find("{")
+    end = fenced.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = fenced[start:end+1]
         try:
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are a seasoned NBA betting and data analyst."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=400,
-                temperature=0.7,
-            )
-            summary = response.choices[0].message.content.strip()
-            return refine_narrative_output(summary, narrative_data, tone="analyst")
+            return json.loads(candidate)
+        except Exception:
+            pass
 
-        except Exception as e:
-            fallback = f"⚠️ (GPT rewrite failed: {e})"
-            return refine_narrative_output(fallback, narrative_data, tone="error")
+    # Try direct parse
+    try:
+        return json.loads(fenced)
+    except Exception:
+        return None
 
-    return refine_narrative_output("⚠️ Invalid mode specified.", narrative_data, tone="error")
+def _fallback_template(data: Dict[str, Any], error: Optional[str] = None) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "macro_summary": "AI narrative unavailable — using template summary only.",
+        "micro_summary": data.get("micro_summary", {}),
+        "analyst_takeaway": "Ensure your OpenAI API key is active and GPT access is configured correctly.",
+        "confidence_summary": [],
+        "metadata": {
+            "generated_at": _now_iso(),
+            "model": "template-fallback",
+        },
+    }
+    if error:
+        out["error"] = error
+    return out
+
+_client: Optional["OpenAI"] = None  # late-bound client
+
+def _get_client() -> Optional["OpenAI"]:
+    """Lazy-initialize OpenAI client (works even if .env loads after import)."""
+    global _client
+    if _client:
+        return _client
+
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        logger.warning("AI mode requested but OPENAI_API_KEY not set.")
+        return None
+    if OpenAI is None:
+        logger.warning("AI mode requested but 'openai' package is not available: %r", _IMPORT_ERROR)
+        return None
+
+    try:
+        _client = OpenAI(api_key=api_key)
+        return _client
+    except Exception as e:  # pragma: no cover
+        logger.error("Failed to initialize OpenAI client: %s", e)
+        return None
+
+def _first_choice_content(resp_obj: Any) -> str:
+    """
+    Safely extract the assistant message content from the chat completion response.
+    Never raises KeyError.
+    """
+    try:
+        choices = getattr(resp_obj, "choices", None) or resp_obj.get("choices")
+    except Exception:
+        choices = None
+
+    if not choices:
+        return ""
+
+    choice0 = choices[0]
+    # Some SDKs return dicts; others return typed objects.
+    msg = None
+    try:
+        msg = getattr(choice0, "message", None) or choice0.get("message")
+    except Exception:
+        msg = None
+
+    if not msg:
+        return ""
+
+    content = None
+    try:
+        content = getattr(msg, "content", None) or msg.get("content")
+    except Exception:
+        content = None
+
+    # Some SDKs (rare) might return content as dict or list; convert to string.
+    if content is None:
+        return ""
+    if isinstance(content, (dict, list)):
+        try:
+            return json.dumps(content)
+        except Exception:
+            return str(content)
+
+    return str(content)
+
+def generate_narrative_summary(narrative_data: Dict[str, Any], mode: str = "template") -> Dict[str, Any]:
+    """
+    Generate an AI-enhanced narrative summary or fallback to structured text.
+    """
+    if mode == "template":
+        return {
+            "date_generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "tone": "neutral",
+            "summary": (
+                f"**NBA Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}**\n\n"
+                f"Welcome to today’s NBA roundup!\n\n"
+                f"**Player Trends:** {len(narrative_data.get('player_trends', []))} tracked.\n"
+                f"**Team Trends:** {len(narrative_data.get('team_trends', []))} observed.\n"
+                f"**Odds:** {len(narrative_data.get('odds', {}).get('games', []))} games active.\n\n"
+                "Enable AI mode for full narrative insights."
+            ),
+            "metadata": {
+                "generated_at": _now_iso(),
+                "model": "template",
+            },
+        }
+
+    client = _get_client()
+    if not client:
+        logger.warning("AI mode requested but OPENAI client unavailable. Falling back to template.")
+        return {
+            "date_generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "tone": "neutral",
+            "summary": (
+                f"**NBA Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}**\n\n"
+                f"Welcome to today’s NBA roundup!\n\n"
+                f"**Player Trends:** {len(narrative_data.get('player_trends', []))} tracked.\n"
+                f"**Team Trends:** {len(narrative_data.get('team_trends', []))} observed.\n"
+                f"**Odds:** {len(narrative_data.get('odds', {}).get('games', []))} games active.\n\n"
+                "Enable AI mode for full narrative insights."
+            ),
+            "metadata": {
+                "generated_at": _now_iso(),
+                "model": "template",
+            },
+        }
+
+    # --- Build prompt and call GPT with JSON response enforced ---
+    try:
+        json_input = json.dumps(narrative_data, indent=2)
+        # IMPORTANT: do NOT use .format() here; it conflicts with braces in the schema.
+        prompt = AI_NARRATIVE_PROMPT.replace("<<JSON_INPUT>>", json_input)
+
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an NBA data analyst who writes concise JSON-based reports."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            response_format={"type": "json_object"},  # ask for strict JSON
+        )
+
+        raw_text = _first_choice_content(response)
+
+        if LOG_AI_RAW:
+            preview = raw_text[:500].replace("\n", "\\n")
+            logger.warning("RAW_AI_PREVIEW: %s...", preview)
+
+        parsed = None
+        try:
+            parsed = json.loads(raw_text) if raw_text else None
+        except Exception:
+            parsed = _extract_json_anywhere(raw_text)
+
+        coerced = _coerce_schema(parsed or {})
+        return coerced
+
+    except Exception as e:
+        logger.error("OpenAI call failed despite API key present: %r", e)
+        return _fallback_template(narrative_data, error=str(e))
