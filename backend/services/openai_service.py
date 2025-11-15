@@ -1,5 +1,6 @@
 # backend/services/openai_service.py
 from __future__ import annotations
+
 import json
 import logging
 import os
@@ -21,13 +22,14 @@ except Exception as _imp_err:  # pragma: no cover
 else:
     _IMPORT_ERROR = None
 
+
 AI_NARRATIVE_PROMPT = """
 You are a professional NBA data journalist with access to live stats and betting odds.
 
 Using the JSON data below, write a polished multi-layer report for today’s NBA slate.
 
 JSON Input:
-<<JSON_INPUT>>
+{json_input}
 
 Instructions:
 1) Macro Summary — 2–3 paragraphs summarizing key player & team trends.
@@ -51,31 +53,39 @@ Instructions:
 }
 """
 
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _coerce_schema(parsed: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure required keys exist with sane defaults."""
     out: Dict[str, Any] = dict(parsed) if isinstance(parsed, dict) else {}
     out.setdefault("macro_summary", "Missing field: macro_summary")
+
     micro = out.get("micro_summary")
     if not isinstance(micro, dict):
         micro = {}
     micro.setdefault("key_edges", [])
     micro.setdefault("risk_score", 0.0)
     out["micro_summary"] = micro
+
     out.setdefault("analyst_takeaway", "Missing field: analyst_takeaway")
+
     cs = out.get("confidence_summary")
     if not isinstance(cs, list):
         cs = []
     out["confidence_summary"] = cs
+
     meta = out.get("metadata")
     if not isinstance(meta, dict):
         meta = {}
     meta.setdefault("generated_at", _now_iso())
     meta.setdefault("model", "gpt-4o")
     out["metadata"] = meta
+
     return out
+
 
 def _extract_json_anywhere(text: str) -> Optional[Dict[str, Any]]:
     """
@@ -94,7 +104,7 @@ def _extract_json_anywhere(text: str) -> Optional[Dict[str, Any]]:
     start = fenced.find("{")
     end = fenced.rfind("}")
     if start != -1 and end != -1 and end > start:
-        candidate = fenced[start:end+1]
+        candidate = fenced[start:end + 1]
         try:
             return json.loads(candidate)
         except Exception:
@@ -105,6 +115,7 @@ def _extract_json_anywhere(text: str) -> Optional[Dict[str, Any]]:
         return json.loads(fenced)
     except Exception:
         return None
+
 
 def _fallback_template(data: Dict[str, Any], error: Optional[str] = None) -> Dict[str, Any]:
     out: Dict[str, Any] = {
@@ -121,7 +132,9 @@ def _fallback_template(data: Dict[str, Any], error: Optional[str] = None) -> Dic
         out["error"] = error
     return out
 
+
 _client: Optional["OpenAI"] = None  # late-bound client
+
 
 def _get_client() -> Optional["OpenAI"]:
     """Lazy-initialize OpenAI client (works even if .env loads after import)."""
@@ -143,6 +156,7 @@ def _get_client() -> Optional["OpenAI"]:
     except Exception as e:  # pragma: no cover
         logger.error("Failed to initialize OpenAI client: %s", e)
         return None
+
 
 def _first_choice_content(resp_obj: Any) -> str:
     """
@@ -184,6 +198,7 @@ def _first_choice_content(resp_obj: Any) -> str:
             return str(content)
 
     return str(content)
+
 
 def generate_narrative_summary(narrative_data: Dict[str, Any], mode: str = "template") -> Dict[str, Any]:
     """
@@ -230,8 +245,7 @@ def generate_narrative_summary(narrative_data: Dict[str, Any], mode: str = "temp
     # --- Build prompt and call GPT with JSON response enforced ---
     try:
         json_input = json.dumps(narrative_data, indent=2)
-        # IMPORTANT: do NOT use .format() here; it conflicts with braces in the schema.
-        prompt = AI_NARRATIVE_PROMPT.replace("<<JSON_INPUT>>", json_input)
+        prompt = AI_NARRATIVE_PROMPT.format(json_input=json_input)
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -240,15 +254,16 @@ def generate_narrative_summary(narrative_data: Dict[str, Any], mode: str = "temp
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
-            response_format={"type": "json_object"},  # ask for strict JSON
+            response_format={"type": "json_object"},
         )
 
         raw_text = _first_choice_content(response)
 
         if LOG_AI_RAW:
-            preview = raw_text[:500].replace("\n", "\\n")
+            preview = (raw_text or "")[:500].replace("\n", "\\n")
             logger.warning("RAW_AI_PREVIEW: %s...", preview)
 
+        # Try parsing as-is (should already be JSON with response_format)
         parsed = None
         try:
             parsed = json.loads(raw_text) if raw_text else None
