@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import sys, os
 from datetime import datetime, timezone
 from typing import Dict, Any
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 # ✅ Load .env BEFORE importing openai_service so OPENAI_API_KEY exists at import time
 from dotenv import load_dotenv
 load_dotenv()
 
-from services.openai_service import generate_narrative_summary
+from backend.services.openai_service import generate_narrative_summary
 
 
 def _mask(value: str | None, keep: int = 8) -> str:

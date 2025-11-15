@@ -1,0 +1,101 @@
+🧠 AI Agent NBA — Phase 7.5 Recovery & Continuation Prompt
+
+You are resuming work on the AI Agent NBA Backend Project for user J.D.
+The current development phase is Phase 7.5: AI Narrative Layer Integration (Backend) — checkpoint Step 2 verified (Async + Throttle upgrade) and ready for Step 3 (Frontend-ready Markdown & JSON endpoint).
+
+---
+🏗️ Project Summary (as of this checkpoint)
+Project Goal:
+Build a backend AI system that generates and serves dynamic, data-driven NBA narratives using real-time odds, player trends, and team performance data — powering a React/Next.js frontend for a sports analytics app.
+
+Tech Stack:
+- Backend: Python + FastAPI
+- Frontend: React / Next.js (in progress)
+- AI API: OpenAI GPT-4o
+- Data Source: API-Basketball odds feed
+- Tests: Pytest suite (located in /backend/tests/)
+
+Core File Locations:
+/backend
+ ├── main.py
+ ├── routes/
+ │    └── narrative.py           ← currently being enhanced (v2-async verified)
+ ├── services/
+ │    └── openai_service.py      ← handles GPT-4o calls (validated)
+ ├── common/
+ │    └── odds_utils.py          ← verified odds fetch
+ ├── agents/
+ │    ├── trends_agent/
+ │    ├── team_offense_agent/
+ │    ├── team_defense_agent/
+ │    └── player_performance_agent/
+ ├── tests/
+ │    ├── ai_narrative_test.py
+ │    ├── test_narrative_contract.py
+ │    └── test_openai_connect.py
+ └── .env                        ← contains valid OPENAI_API_KEY + ODDS_API_KEY
+
+---
+✅ Current Verified State
+1. openai_service.py upgraded — GPT-4o JSON schema stable.
+2. ai_narrative_test.py and test_openai_connect.py verified OpenAI key and GPT model retrieval.
+3. /nba/narrative/today endpoint runs fully async, supports caching and throttling.
+4. Both template and AI modes produce structured outputs.
+5. Step 2 (Async + Throttle) complete; performance validated via cURL.
+
+---
+🎯 Next Planned Step (Step 3 — Frontend-ready Markdown Layer)
+Add a new /nba/narrative/markdown endpoint returning both Markdown and JSON.
+Normalize AI and template summaries into a unified structure.
+Preserve existing cache/throttle behavior.
+Maintain prompt_version = "v3-frontend" and embed inputs_digest for React cache invalidation.
+Ensure Markdown output is properly escaped and ready for rendering in React.
+Add optional query param ?compact=true for summarized Markdown.
+
+---
+⚙️ Testing Targets
+curl -s "http://127.0.0.1:8000/nba/narrative/markdown?mode=ai" | jq '.summary.metadata'
+curl -s "http://127.0.0.1:8000/nba/narrative/markdown?mode=template" | jq '.markdown'
+
+Expected:
+- "prompt_version": "v3-frontend"
+- "cache_used": false then true on repeat
+- Markdown text output ready for rendering in React
+
+---
+🧩 When Resuming, The AI Should:
+Recognize last verified version was routes/narrative.py (v2-async).
+Generate full replacement file for Step 3 with Markdown + JSON hybrid response.
+Provide post-update test instructions (2 cURLs + 1 pytest).
+Verify that existing async + cache logic remains intact.
+Prepare for Step 4: frontend integration and environment-specific configs (staging keys).
+
+Reference Checkpoint Name:
+🏁 Checkpoint: “Phase 7.5 → Step 2 Verified — Async + Throttle Stable (2025-11-15)”
+
+---
+✅ To Resume
+Paste this prompt into ChatGPT and say:
+“Resume from Checkpoint: Phase 7.5 → Step 2 Verified — Async + Throttle Stable (2025-11-15). Continue with Step 3 (Frontend-ready Markdown endpoint).”
+
+
+--------------------------------------------------------------------------------
+
+🧠 Emergency Resume Prompt — AI Agent NBA Project (Phase 7.5)
+
+Resume work on the AI Agent NBA backend for J.D.
+Current checkpoint: Phase 7.5 → Step 2 Verified — Async + Throttle Stable (2025-11-15).
+
+✅ FastAPI backend verified; async /nba/narrative/today endpoint with cache + throttle.
+✅ openai_service.py and odds_utils.py validated; GPT-4o JSON schema correct.
+✅ Prompt version: "v2-async" confirmed.
+
+Next step (Step 3):
+Add /nba/narrative/markdown endpoint returning both JSON + Markdown.
+Normalize AI and template outputs for React display.
+Include ?compact=true for condensed Markdown.
+Preserve async/cache/throttle behavior.
+Set prompt_version="v3-frontend".
+
+When resuming, start by generating the full upgraded routes/narrative.py file for Step 3,
+then test with cURL and verify metadata + markdown output.
