@@ -1,8 +1,7 @@
 # backend/main.py
 from __future__ import annotations
-
-import os
 import logging
+import os
 from datetime import datetime, timezone
 from typing import List
 
@@ -30,21 +29,19 @@ if not logger.handlers:
 # -------------------------------------------------
 def _parse_allowed_origins() -> List[str]:
     """
-    Read ALLOWED_ORIGINS from env (comma-separated).
-    Defaults to ['*'] for local/dev.
-    Example:
-      ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:5173
+    Returns a list of allowed frontend origins for CORS.
+    Includes both localhost and 127.0.0.1 for ports 3000 and 5173 by default.
     """
-    raw = os.getenv("ALLOWED_ORIGINS", "*").strip()
-    if not raw:
-        return ["*"]
-    # Support JSON-like array or comma-separated string
-    if raw.startswith("[") and raw.endswith("]"):
-        # crude parse without json import: strip [ ] and split by comma
-        inner = raw[1:-1]
-        parts = [p.strip().strip("'").strip('"') for p in inner.split(",") if p.strip()]
-        return parts or ["*"]
-    return [p.strip() for p in raw.split(",") if p.strip()] or ["*"]
+    origins_env = os.getenv("ALLOWED_ORIGINS", "")
+    if not origins_env.strip():
+        return [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:8000"
+        ]
+    return [origin.strip() for origin in origins_env.split(",") if origin.strip()]
 
 
 OPENAI_OK = bool(os.getenv("OPENAI_API_KEY"))
@@ -68,71 +65,56 @@ app = FastAPI(
 )
 
 # -------------------------------------------------
-# 🌐 CORS Middleware
+# 🌐 CORS Middleware (Wildcard Dev Mode)
 # -------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -------------------------------------------------
-# 🧩 Route Imports
+# 📂 Import route modules after app is initialized
 # -------------------------------------------------
 from routes import nba_games_today, narrative  # noqa: E402
 
 # -------------------------------------------------
-# 🔗 Register Routers
+# 🛤️ Register route modules
 # -------------------------------------------------
 app.include_router(nba_games_today.router)
 app.include_router(narrative.router)
 
 # -------------------------------------------------
-# 🏁 Root Endpoint
+# 🏠 Root endpoint
 # -------------------------------------------------
 @app.get("/")
-def root():
+async def root():
     return {
-        "ok": True,
         "message": "🏀 AI Agent NBA Backend is running!",
-        "routes": [
-            "/nba/narrative/today?mode=ai",
-            "/nba/narrative/today?mode=template",
-            "/nba/games/today",
-            "/health",
-        ],
-    }
-
-# -------------------------------------------------
-# 🩺 Health Endpoint
-# -------------------------------------------------
-_STARTED_AT = datetime.now(timezone.utc)
-
-@app.get("/health")
-def health():
-    now = datetime.now(timezone.utc)
-    uptime = (now - _STARTED_AT).total_seconds()
-    return {
-        "status": "ok",
-        "started_at": _STARTED_AT.isoformat(),
-        "uptime_seconds": int(uptime),
-        "env": {
-            "openai_key": "present" if OPENAI_OK else "missing",
-            "odds_key": "present" if ODDS_OK else "missing",
-            "tz": TZ,
-        },
-        "cors": {
-            "allow_origins": ALLOWED_ORIGINS,
-        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "healthy",
         "version": "1.0.0",
-        "service": "AI Agent - NBA Narrative Backend",
+        "endpoints": {
+            "narrative_today": "/nba/narrative/today",
+            "narrative_markdown": "/nba/narrative/markdown",
+            "games_today": "/nba/games/today",
+            "docs": "/docs"
+        }
     }
 
 # -------------------------------------------------
-# 🧪 Run Server (optional manual entry)
+# 🧪 Health check endpoint
 # -------------------------------------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "environment": {
+            "openai_configured": OPENAI_OK,
+            "odds_configured": ODDS_OK,
+            "timezone": TZ
+        }
+    }

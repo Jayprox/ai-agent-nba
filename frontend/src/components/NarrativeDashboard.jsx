@@ -1,147 +1,121 @@
-// frontend/src/pages/NarrativeDashboard.jsx
-import { useState, useEffect } from "react";
+// frontend/src/components/NarrativeDashboard.jsx
+import { useEffect, useState } from "react";
+import ReactMarkdown from "react-markdown";
 
-export default function NarrativeDashboard() {
-  const [data, setData] = useState(null);
-  const [mode, setMode] = useState("template");
-  const [loading, setLoading] = useState(false);
-  const [timestamp, setTimestamp] = useState("");
+const NarrativeDashboard = () => {
+  const [markdown, setMarkdown] = useState("");
+  const [meta, setMeta] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [isRegenerating, setIsRegenerating] = useState(false);
 
-  const fetchNarrative = async (m = "template") => {
+  const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+
+  const fetchMarkdown = async (forceRefresh = false) => {
     setLoading(true);
-    const res = await fetch(`http://127.0.0.1:8000/nba/narrative/today?mode=${m}`);
-    const json = await res.json();
-    setData(json);
-    setMode(m);
-    setTimestamp(new Date().toLocaleTimeString());
-    setLoading(false);
+    setError(null);
+    try {
+      const url = `${API_BASE}/nba/narrative/markdown?mode=ai${forceRefresh ? "&cache_ttl=0" : ""}`;
+      console.log("🔍 Fetching from:", url);
+      const res = await fetch(url);
+      console.log("📡 Response status:", res.status);
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+
+      const data = await res.json();
+      console.log("📦 Response data:", data);
+
+      if (!data.ok) throw new Error(data.error || "Backend returned ok: false");
+      if (!data.markdown) throw new Error("No markdown field in response");
+
+      setMarkdown(data.markdown);
+      setMeta(data.summary?.metadata || {});
+      console.log("✅ Markdown loaded successfully");
+    } catch (err) {
+      console.error("❌ Fetch error:", err);
+      setError(err.message);
+    } finally {
+      setLoading(false);
+      setIsRegenerating(false);
+    }
   };
 
   useEffect(() => {
-    fetchNarrative("template");
-  }, []);
+    fetchMarkdown();
+  }, [API_BASE]);
+
+  if (loading) return <div className="p-4 text-white">⏳ Generating narrative...</div>;
+
+  if (error) {
+    return (
+      <div className="p-4 text-red-400">
+        <h2 className="text-xl font-bold mb-2">❌ Error</h2>
+        <p className="mb-4">{error}</p>
+      </div>
+    );
+  }
+
+  const generatedAt = meta?.generated_at
+    ? new Date(meta.generated_at).toLocaleString()
+    : "N/A";
 
   return (
-    <div
-      className="min-h-screen bg-zinc-900 p-8 font-sans text-gray-100 transition-all duration-500"
-      style={{ color: "#e5e7eb" }}
-    >
-      {/* Header */}
-      <h1 className="text-3xl font-bold mb-6 flex items-center gap-2 animate-fadeIn">
-        📈 NBA Narrative Dashboard
-      </h1>
-
-      {/* Controls */}
-      <div className="flex items-center gap-3 mb-6 animate-fadeIn delay-200">
+    <div className="p-6 text-white max-w-4xl mx-auto">
+      {/* Header + Regenerate */}
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold">🧠 AI Narrative Dashboard</h1>
         <button
-          onClick={() => fetchNarrative("template")}
-          className={`px-4 py-2 rounded-lg font-medium transition ${
-            mode === "template"
-              ? "bg-blue-600 text-white shadow-lg"
-              : "bg-zinc-700 hover:bg-zinc-600 text-gray-200"
+          onClick={() => {
+            setIsRegenerating(true);
+            fetchMarkdown(true);
+          }}
+          disabled={isRegenerating}
+          className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+            isRegenerating
+              ? "bg-gray-700 text-gray-400 cursor-not-allowed"
+              : "bg-blue-600 text-white hover:bg-blue-700"
           }`}
         >
-          Template
+          {isRegenerating ? "Generating..." : "Regenerate Narrative"}
         </button>
-        <button
-          onClick={() => fetchNarrative("ai")}
-          className={`px-4 py-2 rounded-lg font-medium transition ${
-            mode === "ai"
-              ? "bg-green-600 text-white shadow-lg"
-              : "bg-zinc-700 hover:bg-zinc-600 text-gray-200"
-          }`}
-        >
-          AI Narrative
-        </button>
-        <button
-          onClick={() => fetchNarrative(mode)}
-          className="px-4 py-2 rounded-lg bg-gray-600 hover:bg-gray-500 font-medium text-white transition shadow-md"
-        >
-          Refresh
-        </button>
-
-        {timestamp && (
-          <span className="text-sm text-gray-400 ml-3 italic">
-            Last updated: {timestamp}
-          </span>
-        )}
       </div>
 
-      {/* Mode Indicator */}
-      <p className="mb-6 text-lg animate-fadeIn delay-300">
-        <strong>Mode:</strong>{" "}
-        {mode === "ai" ? (
-          <span className="text-pink-400 font-semibold">AI-enhanced 🧠</span>
-        ) : (
-          <span className="text-blue-400 font-semibold">Template</span>
-        )}
-      </p>
-
-      {/* Split layout */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Left: Narrative */}
-        <div className="bg-zinc-800/90 p-6 rounded-2xl shadow-xl border border-zinc-700 animate-fadeIn delay-500 hover:shadow-pink-600/20 transition-all duration-300">
-          {loading ? (
-            <p className="text-gray-400 italic">Loading narrative...</p>
-          ) : (
-            <p className="leading-relaxed text-base tracking-wide">
-              {data?.summary || "No summary available."}
-            </p>
-          )}
-        </div>
-
-        {/* Right: Trends + Odds */}
-        <div className="space-y-6">
-          {/* Key Trends */}
-          <div className="bg-zinc-800/90 p-5 rounded-2xl shadow-lg border border-zinc-700 animate-fadeIn delay-700 hover:shadow-pink-600/20 transition-all duration-300">
-            <h3 className="font-semibold mb-3 text-xl text-pink-400 flex items-center gap-2">
-              🧠 Key Trends
-            </h3>
-            <ul className="list-disc ml-5 text-gray-200 space-y-1 text-sm">
-              {data?.raw?.trends?.player_trends?.slice(0, 5).map((t, i) => (
-                <li key={i}>
-                  <span className="font-medium">{t.player_name}</span> —{" "}
-                  {t.stat_type} avg {t.average.toFixed(1)} ({t.trend_direction})
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          {/* Odds */}
-          <div className="bg-zinc-800/90 p-5 rounded-2xl shadow-lg border border-zinc-700 animate-fadeIn delay-900 hover:shadow-green-600/20 transition-all duration-300">
-            <h3 className="font-semibold mb-3 text-xl text-green-400 flex items-center gap-2">
-              💸 Top Odds Matchups
-            </h3>
-            <ul className="list-disc ml-5 text-gray-200 space-y-1 text-sm">
-              {data?.raw?.odds?.games?.slice(0, 5).map((g, i) => (
-                <li key={i}>
-                  <span className="font-medium">{g.away_team}</span> @{" "}
-                  <span className="font-medium">{g.home_team}</span> —{" "}
-                  <span className="text-gray-400">
-                    {g.moneyline.home.american}/{g.moneyline.away.american}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
+      {/* Metadata */}
+      <div className="text-sm text-gray-400 mb-4">
+        <p>Model: {meta?.model || "Unknown"}</p>
+        <p>Generated: {generatedAt}</p>
+        <p>Digest: {meta?.inputs_digest || "—"}</p>
       </div>
 
-      {/* Animation styles */}
-      <style>{`
-        @keyframes fadeIn {
-          from { opacity: 0; transform: translateY(10px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        .animate-fadeIn {
-          animation: fadeIn 0.6s ease forwards;
-        }
-        .delay-200 { animation-delay: 0.2s; }
-        .delay-300 { animation-delay: 0.3s; }
-        .delay-500 { animation-delay: 0.5s; }
-        .delay-700 { animation-delay: 0.7s; }
-        .delay-900 { animation-delay: 0.9s; }
-      `}</style>
+      {/* Markdown content */}
+      <div
+        className="prose max-w-none bg-gray-900 p-6 rounded-2xl shadow-lg overflow-auto min-h-[400px]"
+        style={{
+          color: "white",
+        }}
+      >
+        <style>
+          {`
+            .prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+              color: #f8fafc !important;
+            }
+            .prose p, .prose li, .prose span, .prose strong {
+              color: #f1f5f9 !important;
+            }
+            .prose a {
+              color: #60a5fa !important;
+            }
+            .prose code {
+              color: #facc15 !important;
+              background-color: #1e293b !important;
+              padding: 0.15em 0.35em;
+              border-radius: 4px;
+            }
+          `}
+        </style>
+        <ReactMarkdown>{markdown}</ReactMarkdown>
+      </div>
     </div>
   );
-}
+};
+
+export default NarrativeDashboard;
