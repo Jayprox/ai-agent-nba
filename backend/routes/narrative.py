@@ -10,38 +10,36 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 
+# --- Internal imports ---
 from agents.trends_agent.fetch_trends import get_trends_summary
 from agents.player_performance_agent.fetch_player_stats_live import fetch_player_stats
-from common.odds_utils import fetch_moneyline_odds
 from agents.odds_agent.models import OddsResponse
+from common.odds_utils import fetch_moneyline_odds
 from services.openai_service import generate_narrative_summary
 
 router = APIRouter(prefix="/nba/narrative", tags=["Narrative"])
 
-# ---------------------------------------------------------------------------
-# Cache & Throttle Controls
-# ---------------------------------------------------------------------------
-_CACHE: Dict[Tuple[str, int], Dict[str, Any]] = {}
-_LAST_CALL: Dict[str, float] = {}
-_THROTTLE_SECONDS = 3
+# -------------------------
+# Config / Cache
+# -------------------------
+_CACHE: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
 _MAX_CACHE_TTL = 120
-_PROMPT_VERSION = "v2-async"
+_PROMPT_VERSION = "v3.5-async"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# -------------------------
+# Utility Helpers
+# -------------------------
 def _now_utc_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def _cap_ttl(ttl: int) -> int:
-    if ttl < 0:
-        return 0
-    return min(ttl, _MAX_CACHE_TTL)
+    return max(0, min(ttl, _MAX_CACHE_TTL))
 
 
 def _sha1_digest(obj: Any) -> str:
+    """Deterministic digest of key inputs for smart invalidation."""
     try:
         pruned = {
             "date_generated": obj.get("date_generated"),
@@ -52,138 +50,152 @@ def _sha1_digest(obj: Any) -> str:
         }
     except Exception:
         pruned = {"raw_len": len(str(obj))}
-    data = json.dumps(pruned, sort_keys=True, separators=(",", ":")).encode()
+    data = json.dumps(pruned, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha1:" + hashlib.sha1(data).hexdigest()
 
 
-def _to_markdown(summary: Dict[str, Any]) -> str:
+# -------------------------
+# Markdown Renderer
+# -------------------------
+def _render_markdown(summary: Dict[str, Any], compact: bool = False) -> str:
+    # Safely extract metadata
     meta = summary.get("metadata", {})
+    if not isinstance(meta, dict):
+        meta = {}
+    
     gen_at = meta.get("generated_at", "")
     model = meta.get("model", "")
+    
+    # Safely extract summary components
     macro = summary.get("macro_summary")
     micro = summary.get("micro_summary", {})
+    if not isinstance(micro, dict):
+        micro = {}
+    
     edges = micro.get("key_edges", []) or []
+    if not isinstance(edges, list):
+        edges = []
+    
     risk = micro.get("risk_score")
     analyst = summary.get("analyst_takeaway")
-    text = summary.get("summary")
+    plain = summary.get("summary")
 
     lines = [f"**NBA Narrative**  \n_Generated: {gen_at} • Model: {model}_"]
 
     if macro:
+        macro_text = "\n\n".join(macro) if isinstance(macro, list) else str(macro)
         lines.append("\n### Macro Summary")
-        if isinstance(macro, list):
-            lines.extend(macro)
-        else:
-            lines.append(str(macro))
+        lines.append(macro_text.strip())
 
-    if edges:
+    if edges and not compact:
         lines.append("\n### Key Edges")
         for e in edges:
-            lbl = e.get("value_label", "")
-            score = e.get("edge_score", "")
-            t = e.get("text", "")
-            lines.append(f"- **{lbl}** (score: {score}): {t}")
+            # Safely handle edges that might be strings or dicts
+            if isinstance(e, dict):
+                lbl = e.get("value_label", "")
+                score = e.get("edge_score", "")
+                t = e.get("text", "")
+                lines.append(f"- **{lbl}** (score: {score}): {t}")
+            elif isinstance(e, str):
+                lines.append(f"- {e}")
+            else:
+                lines.append(f"- {str(e)}")
 
-    if risk is not None:
+    if risk is not None and not compact:
         lines.append(f"\n**Risk Score:** {risk}")
 
     if analyst:
         lines.append("\n### Analyst Takeaway")
-        lines.append(str(analyst))
+        lines.append(str(analyst).strip())
 
-    if not macro and text:
+    if not macro and plain:
         lines.append("\n### Summary")
-        lines.append(text.strip())
+        lines.append(str(plain).strip())
 
-    return "\n".join(lines).strip()
+    return "\n".join(lines).strip() if not compact else " ".join(lines)[:1000]
 
 
-async def _fetch_trends_safe() -> Tuple[list, list, dict]:
+# -------------------------
+# Async Fetch Helpers
+# -------------------------
+async def _safe_call(label: str, func, *args, **kwargs):
+    """Run a function safely and catch errors for meta logging."""
     try:
-        trends = await asyncio.to_thread(get_trends_summary)
-        return trends.player_trends, trends.team_trends, {}
+        result = await asyncio.to_thread(func, *args, **kwargs)
+        return result, None
     except Exception as e:
-        return [], [], {"trends": f"{type(e).__name__}: {e}"}
+        return None, f"{label}: {type(e).__name__}: {e}"
 
 
-async def _fetch_props_safe() -> Tuple[list, dict]:
-    try:
-        props = await asyncio.to_thread(fetch_player_stats, 134)
-        if isinstance(props, dict):
-            return props.get("data", []), {}
-        return [], {}
-    except Exception as e:
-        return [], {"props": f"{type(e).__name__}: {e}"}
-
-
-async def _fetch_odds_safe() -> Tuple[dict, dict]:
-    try:
-        odds = await asyncio.to_thread(fetch_moneyline_odds)
-        return (
-            odds.model_dump() if isinstance(odds, OddsResponse) else odds,
-            {},
-        )
-    except Exception as e:
-        return {"games": []}, {"odds": f"{type(e).__name__}: {e}"}
-
-
-# ---------------------------------------------------------------------------
-# Route
-# ---------------------------------------------------------------------------
+# -------------------------
+# Core /today Endpoint
+# -------------------------
 @router.get("/today")
 async def get_daily_narrative(
     mode: str = Query("template", description="template or ai"),
-    cache_ttl: int = Query(0, description="seconds to cache the response (server caps at 120s)"),
-    format: Optional[str] = Query(None, description="Set to 'markdown' to include a rendered markdown field"),
+    cache_ttl: int = Query(0, description="seconds to cache (max 120s)"),
+    format: Optional[str] = Query(None, description="Set to 'markdown' to include Markdown field"),
 ) -> Dict[str, Any]:
-    """Generate the daily NBA narrative summary asynchronously with throttling."""
     t0 = time.perf_counter()
     ttl = _cap_ttl(cache_ttl)
-    cache_key = (mode, ttl)
+    cache_key = (mode, ttl, "today")
 
-    # --- Throttle (1 request / 3s per mode)
-    now = time.time()
-    last_call = _LAST_CALL.get(mode, 0)
-    if now - last_call < _THROTTLE_SECONDS:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Too many requests for mode '{mode}'. Try again in {round(_THROTTLE_SECONDS - (now - last_call), 1)}s.",
-        )
-    _LAST_CALL[mode] = now
-
-    # --- Cache check
     cached = _CACHE.get(cache_key)
-    if cached and cached["expires_at"] > now:
+    if cached and cached["expires_at"] > time.time():
         payload = dict(cached["payload"])
         payload["raw"]["meta"]["latency_ms"] = 0.0
         payload["raw"]["meta"]["cache_used"] = True
         return payload
 
-    # --- Async gather for data
-    player_trends, team_trends, err_trends = await _fetch_trends_safe()
-    props, err_props = await _fetch_props_safe()
-    odds, err_odds = await _fetch_odds_safe()
-    soft_errors = {**err_trends, **err_props, **err_odds}
+    # --- Parallel data fetches ---
+    trends_task = _safe_call("trends", get_trends_summary)
+    props_task = _safe_call("props", fetch_player_stats, 134)
+    odds_task = _safe_call("odds", fetch_moneyline_odds)
+
+    trends, props, odds = await asyncio.gather(trends_task, props_task, odds_task)
+    soft_errors: Dict[str, str] = {}
+
+    # --- Unpack safely ---
+    trends_data, trends_err = trends
+    props_data, props_err = props
+    odds_data, odds_err = odds
+
+    if trends_err: soft_errors["trends"] = trends_err
+    if props_err: soft_errors["props"] = props_err
+    if odds_err: soft_errors["odds"] = odds_err
+
+    team_trends, player_trends = [], []
+    if trends_data:
+        team_trends, player_trends = trends_data.team_trends, trends_data.player_trends
 
     narrative_data = {
         "date_generated": _now_utc_str(),
         "player_trends": [p.model_dump() for p in player_trends],
         "team_trends": [t.model_dump() for t in team_trends],
-        "player_props": props,
-        "odds": odds,
+        "player_props": props_data.get("data", []) if isinstance(props_data, dict) else [],
+        "odds": odds_data.model_dump() if isinstance(odds_data, OddsResponse) else odds_data,
     }
 
-    # --- Generate narrative (AI or template)
-    summary = await asyncio.to_thread(generate_narrative_summary, narrative_data, mode)
+    # --- Generate Narrative ---
+    summary = generate_narrative_summary(narrative_data, mode=mode)
+    if not isinstance(summary, dict):
+        summary = {"summary": str(summary), "metadata": {}}
 
-    metadata = summary.get("metadata", {}) if isinstance(summary, dict) else {}
-    metadata.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
-    metadata.setdefault("model", "template" if mode != "ai" else "gpt-4o")
-    metadata["prompt_version"] = _PROMPT_VERSION
-    metadata["inputs_digest"] = _sha1_digest(narrative_data)
+    # Safely handle metadata
+    metadata = summary.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    
+    metadata.update({
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "model": metadata.get("model", "template" if mode != "ai" else "gpt-4o"),
+        "prompt_version": _PROMPT_VERSION,
+        "inputs_digest": _sha1_digest(narrative_data),
+    })
     summary["metadata"] = metadata
 
-    resp = {
+    # --- Construct Final Response ---
+    resp: Dict[str, Any] = {
         "ok": True,
         "summary": summary,
         "raw": {
@@ -205,10 +217,47 @@ async def get_daily_narrative(
         "mode": mode,
     }
 
-    if (format or "").lower() == "markdown":
-        resp["markdown"] = _to_markdown(summary)
+    fmt_str = str(format).lower() if format is not None else ""
+    if fmt_str == "markdown":
+        resp["markdown"] = _render_markdown(summary)
 
     if ttl > 0:
-        _CACHE[cache_key] = {"expires_at": now + ttl, "payload": resp}
+        _CACHE[cache_key] = {"expires_at": time.time() + ttl, "payload": resp}
 
     return resp
+
+
+# -------------------------
+# Markdown Endpoint
+# -------------------------
+@router.get("/markdown")
+async def get_markdown_narrative(
+    mode: str = Query("template", description="template or ai"),
+    cache_ttl: int = Query(0, description="seconds to cache (max 120s)"),
+    compact: bool = Query(False, description="Return a compact Markdown form"),
+) -> Dict[str, Any]:
+    try:
+        data = await get_daily_narrative(mode=mode, cache_ttl=cache_ttl)
+        summary = data.get("summary", {}) or {}
+
+        # ✅ Ensure summary is a dict (not string fallback)
+        if not isinstance(summary, dict):
+            summary = {"summary": str(summary), "metadata": {}}
+
+        markdown = _render_markdown(summary, compact=compact)
+
+        data["markdown"] = markdown
+        data["summary"]["metadata"]["prompt_version"] = _PROMPT_VERSION
+        return data
+    except Exception as e:
+        err_text = f"Markdown generation failed: {type(e).__name__}: {e}"
+        return {
+            "ok": False,
+            "error": err_text,
+            "markdown": f"**NBA Narrative (Error Fallback)**\n\n{err_text}",
+            "meta": {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "mode": mode,
+                "prompt_version": _PROMPT_VERSION,
+            },
+        }
