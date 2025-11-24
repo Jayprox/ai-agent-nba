@@ -12,7 +12,6 @@ from fastapi import APIRouter, HTTPException, Query
 
 # --- Internal imports ---
 from agents.trends_agent.fetch_trends import get_trends_summary
-from agents.player_performance_agent.fetch_player_stats_live import fetch_player_stats
 from agents.odds_agent.models import OddsResponse
 from common.odds_utils import fetch_moneyline_odds
 from services.openai_service import generate_narrative_summary
@@ -62,20 +61,20 @@ def _render_markdown(summary: Dict[str, Any], compact: bool = False) -> str:
     meta = summary.get("metadata", {})
     if not isinstance(meta, dict):
         meta = {}
-    
+
     gen_at = meta.get("generated_at", "")
     model = meta.get("model", "")
-    
+
     # Safely extract summary components
     macro = summary.get("macro_summary")
     micro = summary.get("micro_summary", {})
     if not isinstance(micro, dict):
         micro = {}
-    
+
     edges = micro.get("key_edges", []) or []
     if not isinstance(edges, list):
         edges = []
-    
+
     risk = micro.get("risk_score")
     analyst = summary.get("analyst_takeaway")
     plain = summary.get("summary")
@@ -147,22 +146,24 @@ async def get_daily_narrative(
         payload["raw"]["meta"]["cache_used"] = True
         return payload
 
-    # --- Parallel data fetches ---
+    # --- Parallel data fetches (trends + odds only for now) ---
     trends_task = _safe_call("trends", get_trends_summary)
-    props_task = _safe_call("props", fetch_player_stats, 134)
     odds_task = _safe_call("odds", fetch_moneyline_odds)
 
-    trends, props, odds = await asyncio.gather(trends_task, props_task, odds_task)
+    trends, odds = await asyncio.gather(trends_task, odds_task)
     soft_errors: Dict[str, str] = {}
 
     # --- Unpack safely ---
     trends_data, trends_err = trends
-    props_data, props_err = props
     odds_data, odds_err = odds
 
-    if trends_err: soft_errors["trends"] = trends_err
-    if props_err: soft_errors["props"] = props_err
-    if odds_err: soft_errors["odds"] = odds_err
+    if trends_err:
+        soft_errors["trends"] = trends_err
+    if odds_err:
+        soft_errors["odds"] = odds_err
+
+    # Explicitly mark player props as backlogged / disabled for now
+    soft_errors["player_props"] = "Live player props integration temporarily disabled (backlog)."
 
     team_trends, player_trends = [], []
     if trends_data:
@@ -172,7 +173,8 @@ async def get_daily_narrative(
         "date_generated": _now_utc_str(),
         "player_trends": [p.model_dump() for p in player_trends],
         "team_trends": [t.model_dump() for t in team_trends],
-        "player_props": props_data.get("data", []) if isinstance(props_data, dict) else [],
+        # 👇 Backlogged: no live player props yet
+        "player_props": [],
         "odds": odds_data.model_dump() if isinstance(odds_data, OddsResponse) else odds_data,
     }
 
@@ -185,7 +187,7 @@ async def get_daily_narrative(
     metadata = summary.get("metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
-    
+
     metadata.update({
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "model": metadata.get("model", "template" if mode != "ai" else "gpt-4o"),

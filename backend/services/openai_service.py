@@ -1,166 +1,126 @@
 # backend/services/openai_service.py
-from __future__ import annotations
-import json
-import logging
 import os
-import re
+import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from openai import OpenAI, OpenAIError
 
+# -------------------------------------------------
+# 🧠 Logging setup
+# -------------------------------------------------
 logger = logging.getLogger("openai_service")
-logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 LOG_AI_RAW = os.getenv("LOG_AI_RAW", "0") == "1"
 
-try:
-    from openai import OpenAI  # type: ignore
-except Exception as _imp_err:
-    OpenAI = None  # type: ignore
-    _IMPORT_ERROR = _imp_err
-else:
-    _IMPORT_ERROR = None
+# -------------------------------------------------
+# 🧩 OpenAI client setup
+# -------------------------------------------------
+api_key = os.getenv("OPENAI_API_KEY")
+client = None
 
-
-AI_NARRATIVE_PROMPT = """
-You are a professional NBA data journalist with access to live stats and betting odds.
-
-Using the JSON data below, produce a multi-layer narrative summary in clean JSON.
-
-JSON Input:
-{json_input}
-
-Instructions:
-1. "macro_summary": 2–3 paragraphs summarizing major player and team trends.
-2. "micro_summary": A JSON object with "key_edges" (list of insights) and "risk_score" (0–1 float).
-3. "analyst_takeaway": One paragraph highlighting predictions or trends.
-4. "confidence_summary": Array of confidence labels (High, Medium, Low).
-5. "metadata": Object with ISO timestamp and model used.
-
-Return ONLY valid JSON. Do NOT include commentary or markdown.
-"""
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _coerce_schema(parsed: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(parsed) if isinstance(parsed, dict) else {}
-    out.setdefault("macro_summary", "Missing macro_summary.")
-    micro = out.get("micro_summary") or {}
-    if not isinstance(micro, dict):
-        micro = {}
-    micro.setdefault("key_edges", [])
-    micro.setdefault("risk_score", 0.0)
-    out["micro_summary"] = micro
-    out.setdefault("analyst_takeaway", "Missing analyst_takeaway.")
-    out.setdefault("confidence_summary", ["Low"])
-    meta = out.get("metadata") or {}
-    if not isinstance(meta, dict):
-        meta = {}
-    meta.setdefault("generated_at", _now_iso())
-    meta.setdefault("model", "gpt-4o")
-    out["metadata"] = meta
-    return out
-
-
-def _extract_json(text: str) -> Optional[Dict[str, Any]]:
-    if not text:
-        return None
-    fenced = re.sub(r"```(?:json)?\s*([\s\S]*?)```", r"\1", text, flags=re.IGNORECASE)
-    start, end = fenced.find("{"), fenced.rfind("}")
-    if start != -1 and end != -1:
-        try:
-            return json.loads(fenced[start:end + 1])
-        except Exception:
-            pass
+if api_key:
     try:
-        return json.loads(fenced)
-    except Exception:
-        return None
+        client = OpenAI(api_key=api_key)
+        logger.info("✅ OpenAI client initialized")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize OpenAI client: {e}")
+else:
+    logger.warning("⚠️ No OPENAI_API_KEY found — AI generation disabled")
 
+# -------------------------------------------------
+# 🧠 Generate narrative summary
+# -------------------------------------------------
+def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
+    """
+    Generate a narrative summary for NBA data using OpenAI or a fallback template.
+    """
 
-def _fallback_template(data: Dict[str, Any], error: Optional[str] = None) -> Dict[str, Any]:
-    out = {
-        "macro_summary": "AI narrative unavailable — using template summary only.",
-        "micro_summary": {},
-        "analyst_takeaway": "Ensure your OpenAI API key is active and GPT access is configured correctly.",
-        "confidence_summary": [],
+    # 🧩 Template fallback (used for mock/testing)
+    fallback_template = {
+        "macro_summary": (
+            "The current NBA landscape shows notable player performances "
+            "and evolving team dynamics across recent games."
+        ),
+        "micro_summary": {"key_edges": [], "risk_score": 0.0},
+        "analyst_takeaway": (
+            "Monitor shifts in player efficiency and team pace for upcoming matchups."
+        ),
+        "confidence_summary": ["Medium"],
         "metadata": {
-            "generated_at": _now_iso(),
-            "model": "template-fallback",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "model": "NBA_Template_Fallback"
         },
     }
-    if error:
-        out["error"] = str(error)
-    return out
 
-
-_client: Optional["OpenAI"] = None
-
-
-def _get_client() -> Optional["OpenAI"]:
-    global _client
-    if _client:
-        return _client
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        logger.warning("⚠️ OPENAI_API_KEY not found in environment.")
-        return None
-    if OpenAI is None:
-        logger.error("❌ 'openai' package missing:", _IMPORT_ERROR)
-        return None
-    try:
-        _client = OpenAI(api_key=api_key)
-        return _client
-    except Exception as e:
-        logger.error("❌ Failed to initialize OpenAI client:", e)
-        return None
-
-
-def generate_narrative_summary(narrative_data: Dict[str, Any], mode: str = "template") -> Dict[str, Any]:
-    if mode == "template":
-        return {
-            "date_generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            "tone": "neutral",
-            "summary": (
-                f"**NBA Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}**\n\n"
-                f"Welcome to today’s NBA roundup!\n\n"
-                f"**Player Trends:** {len(narrative_data.get('player_trends', []))} tracked.\n"
-                f"**Team Trends:** {len(narrative_data.get('team_trends', []))} observed.\n"
-                f"**Odds:** {len(narrative_data.get('odds', {}).get('games', []))} games active.\n\n"
-                "Enable AI mode for full narrative insights."
-            ),
-            "metadata": {
-                "generated_at": _now_iso(),
-                "model": "template",
-            },
-        }
-
-    client = _get_client()
-    if not client:
-        return _fallback_template(narrative_data, "No OpenAI client available")
+    # If AI mode is disabled or client unavailable
+    if mode != "ai" or client is None:
+        if LOG_AI_RAW:
+            logger.info("🧩 [Fallback] Using template summary (no AI client or mode=template).")
+        return fallback_template
 
     try:
-        json_input = json.dumps(narrative_data, indent=2)
-        prompt = AI_NARRATIVE_PROMPT.format(json_input=json_input)
+        # -------------------------------------------------
+        # 🧠 Construct AI prompt
+        # -------------------------------------------------
+        prompt_text = (
+            "You are an expert NBA analyst. Analyze the following JSON summary "
+            "data for player and team trends, then produce a 3-part narrative summary "
+            "in Markdown format with sections: Macro Summary, Key Edges, and Analyst Takeaway.\n\n"
+            f"Data:\n{data}"
+        )
 
+        if LOG_AI_RAW:
+            logger.info(f"🧠 [AI] Prompt generated (length={len(prompt_text)} chars)")
+
+        # -------------------------------------------------
+        # 🚀 Call OpenAI API
+        # -------------------------------------------------
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a concise NBA data analyst who writes JSON reports only."},
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": "You are an expert NBA data analyst."},
+                {"role": "user", "content": prompt_text},
             ],
             temperature=0.7,
-            response_format={"type": "json_object"},
+            max_tokens=800,
         )
 
-        raw_text = response.choices[0].message.content or ""
+        ai_text = response.choices[0].message.content.strip()
+
         if LOG_AI_RAW:
-            logger.info("RAW_AI_PREVIEW: %s", raw_text[:400].replace("\n", "\\n"))
+            logger.info(f"🧠 [AI] Response received (length={len(ai_text)} chars)")
 
-        parsed = _extract_json(raw_text) or {}
-        return _coerce_schema(parsed)
+        return {
+            "macro_summary": ai_text,
+            "micro_summary": {"key_edges": [], "risk_score": 0.5},
+            "analyst_takeaway": "Generated successfully via OpenAI.",
+            "confidence_summary": ["High"],
+            "metadata": {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "model": "NBA_Data_Analyst-v1.0",
+            },
+        }
 
+    except OpenAIError as e:
+        logger.error(f"❌ OpenAI API error: {e}")
     except Exception as e:
-        logger.error("OpenAI call failed: %s", e)
-        return _fallback_template(narrative_data, str(e))
+        logger.error(f"❌ Unexpected AI generation error: {e}")
+
+    # -------------------------------------------------
+    # 🧩 Fallback if anything fails
+    # -------------------------------------------------
+    fallback_template["metadata"]["model"] = "AI_Fallback_Mode"
+    fallback_template["metadata"]["error"] = "AI generation failed — fallback used."
+    return fallback_template
+
+
+# -------------------------------------------------
+# 🧪 Direct test mode (for local debug)
+# -------------------------------------------------
+if __name__ == "__main__":
+    sample_data = {"player_trends": [], "team_trends": [], "odds": {"games": []}}
+    print(generate_narrative_summary(sample_data, mode="ai"))

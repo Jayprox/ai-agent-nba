@@ -37,7 +37,7 @@ def fetch_team_defense(team_id: int) -> Dict[str, Any]:
     }
 
 if __name__ == "__main__":
-    test_team_id = 134  # Lakers example
+    test_team_id = 145  # Lakers example
     data = fetch_team_defense(test_team_id)
     print("=== NBA Team Defense (Live) ===")
     print(data)

@@ -1,87 +1,62 @@
 # backend/common/apisports_client.py
 from __future__ import annotations
+
+import logging
 import os
-import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
+
 import requests
 
-API_BASKETBALL_BASE = os.getenv("API_BASKETBALL_BASE", "https://v1.basketball.api-sports.io").rstrip("/")
-API_BASKETBALL_KEY = os.getenv("API_BASKETBALL_KEY", "3cbe7bb1fa1ef31e806d64ea452d77cd").strip()
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# Sensible defaults; adjust later if needed
-DEFAULT_TIMEOUT = (6.0, 20.0)  # (connect, read)
-MAX_RETRIES = 3
-RETRY_BACKOFF_SECS = 1.5
-
-# --- Simple in-memory cache -------------------------------------------------
-_CACHE: dict[Tuple[str, Tuple[Tuple[str, str], ...]], Tuple[float, Dict[str, Any]]] = {}
-_CACHE_TTL = 60.0  # seconds
+_API_BASE = os.getenv("API_BASKETBALL_BASE", "https://v1.basketball.api-sports.io")
+_API_KEY = os.getenv("API_BASKETBALL_KEY", "")
 
 
-def _cache_key(path: str, params: Optional[Dict[str, Any]]) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
-    """Generate a consistent cache key based on path and sorted params."""
-    items = tuple(sorted((params or {}).items()))
-    return (path, items)
-# -----------------------------------------------------------------------------
-
-
-def _headers() -> Dict[str, str]:
-    if not API_BASKETBALL_KEY:
-        raise RuntimeError("API_BASKETBALL_KEY is missing. Add it to your .env")
-    return {
-        "x-apisports-key": API_BASKETBALL_KEY,
-        "Accept": "application/json",
-        "User-Agent": "OddsAgent/1.0 (+AI Agent Backend)"
-    }
+def _build_url(path: str) -> str:
+    if not path.startswith("/"):
+        path = "/" + path
+    return _API_BASE.rstrip("/") + path
 
 
 def apisports_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    GET wrapper with simple retry/backoff on 429/5xx, plus 60s in-memory cache.
-    Returns parsed JSON dict from API-Sports (with keys like 'results', 'response', etc.).
+    Thin wrapper around requests.get for API-Basketball.
+
+    - Uses API_BASKETBALL_BASE + `path`
+    - Sends key in header (x-apisports-key is allowed per docs, as is x-rapidapi-key)
+    - Logs HTTP status and any API 'errors' field
     """
-    url = f"{API_BASKETBALL_BASE}/{path.lstrip('/')}"
-    key = _cache_key(path, params)
-    now = time.time()
+    if not _API_KEY:
+        raise RuntimeError("API_BASKETBALL_KEY is not set in the environment")
 
-    # --- Check cache first ---
-    if key in _CACHE:
-        ts, data = _CACHE[key]
-        if now - ts < _CACHE_TTL:
-            return data
-        else:
-            del _CACHE[key]  # expired
-    # --------------------------
+    url = _build_url(path)
+    headers = {
+        # Direct API-Sports key header (preferred)
+        "x-apisports-key": _API_KEY,
+        # RapidAPI-style header is ALSO allowed according to docs, so we include both
+        "x-rapidapi-key": _API_KEY,
+    }
 
-    last_exc: Optional[Exception] = None
+    logger.info(f"[API-Basketball] GET {url} params={params}")
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = requests.get(url, headers=_headers(), params=params or {}, timeout=DEFAULT_TIMEOUT)
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                    _CACHE[key] = (time.time(), data)  # store in cache
-                    return data
-                except Exception as e:
-                    raise RuntimeError(f"Invalid JSON from API-Sports at {url}: {e}") from e
+    resp = requests.get(url, headers=headers, params=params or {}, timeout=15)
+    logger.info(f"[API-Basketball] HTTP {resp.status_code}")
 
-            # soft backoff for rate limit or transient server errors
-            if resp.status_code in (429, 500, 502, 503, 504):
-                retry_after = resp.headers.get("Retry-After")
-                wait = float(retry_after) if retry_after else RETRY_BACKOFF_SECS * attempt
-                time.sleep(min(wait, 8.0))
-                last_exc = RuntimeError(f"HTTP {resp.status_code} at {url}: {resp.text[:200]}")
-                continue
+    try:
+        data = resp.json()
+    except Exception:
+        logger.error("Failed to decode JSON from API-Basketball")
+        resp.raise_for_status()
+        raise
 
-            # non-retryable
-            raise RuntimeError(f"HTTP {resp.status_code} at {url}: {resp.text[:200]}")
+    # Log API-level errors if present
+    if isinstance(data, dict):
+        errors = data.get("errors") or []
+        if errors:
+            logger.warning(f"[API-Basketball] API errors: {errors}")
 
-        except requests.RequestException as e:
-            last_exc = e
-            time.sleep(RETRY_BACKOFF_SECS * attempt)
-
-    # out of retries
-    if last_exc:
-        raise RuntimeError(f"API-Sports request failed after {MAX_RETRIES} attempts: {last_exc}")
-    raise RuntimeError("API-Sports request failed unexpectedly.")
+    # Raise for non-2xx so our tests see the problem
+    resp.raise_for_status()
+    return data  # {'get', 'parameters', 'errors', 'results', 'response'}
