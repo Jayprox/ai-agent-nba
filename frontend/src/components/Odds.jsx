@@ -1,185 +1,136 @@
-import React, { useState, useEffect, useRef } from "react";
+// frontend/src/components/Odds.jsx
+import { useEffect, useState } from "react";
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
 const Odds = () => {
-  const [odds, setOdds] = useState([]);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [status, setStatus] = useState("Idle");
-  const prevOddsRef = useRef([]);
+  const [games, setGames] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  // --- Fetch odds ---
-  const fetchOdds = async (auto = false) => {
-    if (!auto) setStatus("Syncing");
-    try {
-      const res = await fetch("http://127.0.0.1:8000/nba/odds/today");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-
-      const newGames = data.games || [];
-      const prevGames = prevOddsRef.current;
-
-      const merged = newGames.map((g) => {
-        const prev = prevGames.find(
-          (pg) => pg.home_team === g.home_team && pg.away_team === g.away_team
-        );
-        let trend = "none";
-        if (prev) {
-          if (g.moneyline.home.american > prev.moneyline.home.american) trend = "up";
-          else if (g.moneyline.home.american < prev.moneyline.home.american)
-            trend = "down";
-        }
-        return { ...g, trend };
-      });
-
-      setOdds(merged);
-      prevOddsRef.current = newGames;
-      setLastUpdated(new Date().toLocaleTimeString());
-      setStatus("Synced");
-      setTimeout(() => setStatus("Idle"), 2500);
-    } catch (err) {
-      console.error(err);
-      setStatus("Error");
-    }
-  };
-
-  // --- Auto refresh every 60s ---
   useEffect(() => {
-    fetchOdds();
-    const interval = setInterval(() => fetchOdds(true), 60000);
-    return () => clearInterval(interval);
+    const fetchTodayGames = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+
+        console.log("🔍 Fetching today's slate from:", `${API_BASE}/nba/games/today`);
+
+        const res = await fetch(`${API_BASE}/nba/games/today`);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        }
+
+        const data = await res.json();
+        console.log("📦 /nba/games/today response:", data);
+
+        if (!data.ok) {
+          throw new Error(data.error || "Backend returned ok: false");
+        }
+
+        setGames(data.games || []);
+      } catch (err) {
+        console.error("❌ Error loading today's games:", err);
+        setError(err.message || "Failed to fetch today's slate");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchTodayGames();
   }, []);
 
-  const badgeColor = {
-    Idle: "#444",
-    Syncing: "#007bff",
-    Synced: "#0f0",
-    Error: "#f00",
-  }[status];
+  if (loading) {
+    return (
+      <div className="p-4 text-white">
+        ⏳ Loading today&apos;s NBA slate...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-4 text-red-400">
+        <p className="font-semibold">Error loading today&apos;s games</p>
+        <p className="text-sm mt-1">{error}</p>
+      </div>
+    );
+  }
+
+  if (!games.length) {
+    return (
+      <div className="p-4 text-gray-300">
+        No NBA games found for today.
+      </div>
+    );
+  }
 
   return (
-    <div style={{ padding: 20, color: "white", fontFamily: "Arial, sans-serif" }}>
-      <h2>🏀 NBA Moneyline Odds (Live)</h2>
+    <div className="p-6 text-white max-w-5xl mx-auto">
+      <h1 className="text-2xl font-bold mb-2">📅 Today&apos;s NBA Slate</h1>
+      <p className="text-sm text-gray-300 mb-4">
+        Data from API-Basketball — showing today&apos;s scheduled games.
+      </p>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-        <button
-          onClick={() => fetchOdds()}
-          style={{
-            background: "#007bff",
-            color: "white",
-            border: "none",
-            borderRadius: 6,
-            padding: "6px 12px",
-            cursor: "pointer",
-          }}
-        >
-          Refresh Now
-        </button>
+      <div className="space-y-3">
+        {games.map((game) => {
+          const {
+            id,
+            date,
+            time,
+            timezone,
+            venue,
+            league,
+            home_team,
+            away_team,
+            status,
+          } = game;
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            background: badgeColor,
-            borderRadius: 8,
-            padding: "4px 8px",
-            color: "black",
-            fontWeight: "bold",
-          }}
-        >
-          {status === "Synced" && (
-            <span
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: "limegreen",
-                animation: "pulse 1.2s infinite",
-              }}
-            ></span>
-          )}
-          <span>{status}</span>
-        </div>
+          // Convert to a nicer local time label if possible
+          let tipLabel = time;
+          try {
+            if (date) {
+              const d = new Date(date);
+              tipLabel = d.toLocaleTimeString([], {
+                hour: "numeric",
+                minute: "2-digit",
+              });
+            }
+          } catch {
+            // fall back to raw `time`
+          }
 
-        {lastUpdated && (
-          <span style={{ color: "#aaa", fontSize: 14 }}>
-            Last updated: {lastUpdated}
-          </span>
-        )}
-      </div>
-
-      {odds.length === 0 ? (
-        <p style={{ color: "#888" }}>No games available today.</p>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {odds.map((game, i) => (
+          return (
             <div
-              key={i}
-              style={{
-                background:
-                  game.trend === "up"
-                    ? "rgba(0,128,0,0.2)"
-                    : game.trend === "down"
-                    ? "rgba(255,0,0,0.2)"
-                    : "#1a1a1a",
-                padding: 14,
-                borderRadius: 8,
-                boxShadow: "0 0 8px rgba(255,255,255,0.05)",
-                transition: "background 0.8s ease",
-              }}
+              key={id}
+              className="bg-gray-900/80 border border-gray-700 rounded-xl p-4 flex flex-col md:flex-row md:items-center md:justify-between shadow-lg"
             >
-              <strong style={{ fontSize: 16 }}>
-                {game.away_team} @ {game.home_team}
-              </strong>
-              <p style={{ margin: "6px 0", color: "#ccc" }}>
-                🏠 {game.moneyline.home.team}:{" "}
-                <span
-                  style={{
-                    color:
-                      game.trend === "up"
-                        ? "#0f0"
-                        : game.trend === "down"
-                        ? "#f66"
-                        : "#0f0",
-                    transition: "color 0.8s ease",
-                  }}
-                >
-                  {game.moneyline.home.american}
-                </span>{" "}
-                ({game.moneyline.home.bookmaker})
-              </p>
-              <p style={{ margin: "6px 0", color: "#ccc" }}>
-                🛫 {game.moneyline.away.team}:{" "}
-                <span
-                  style={{
-                    color:
-                      game.trend === "up"
-                        ? "#0f0"
-                        : game.trend === "down"
-                        ? "#f66"
-                        : "#0f0",
-                    transition: "color 0.8s ease",
-                  }}
-                >
-                  {game.moneyline.away.american}
-                </span>{" "}
-                ({game.moneyline.away.bookmaker})
-              </p>
-              <small style={{ color: "#666" }}>
-                Commence → {new Date(game.commence_time).toLocaleString()}
-              </small>
-            </div>
-          ))}
-        </div>
-      )}
+              <div className="mb-3 md:mb-0">
+                <div className="text-sm text-gray-400 mb-1">
+                  {league?.name || "NBA"} • {league?.season} • {timezone}
+                </div>
+                <div className="font-semibold text-lg">
+                  {away_team?.name} @ {home_team?.name}
+                </div>
+                {venue && (
+                  <div className="text-xs text-gray-400 mt-1">
+                    {venue}
+                  </div>
+                )}
+              </div>
 
-      {/* Keyframe for pulsing dot */}
-      <style>{`
-        @keyframes pulse {
-          0% { opacity: 0.4; transform: scale(1); }
-          50% { opacity: 1; transform: scale(1.5); }
-          100% { opacity: 0.4; transform: scale(1); }
-        }
-      `}</style>
+              <div className="text-right">
+                <div className="text-sm text-gray-300">
+                  Tip: <span className="font-semibold">{tipLabel}</span>
+                </div>
+                <div className="text-xs text-gray-400 mt-1">
+                  Status: {status?.long || status?.short || "Scheduled"}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 };
