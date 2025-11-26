@@ -67,6 +67,12 @@ const Odds = () => {
 
   return (
     <div className="p-6 text-white max-w-5xl mx-auto">
+      {/* 🔹 Source banner */}
+      <div className="mb-4 inline-flex items-center gap-2 px-3 py-1 rounded-full border border-sky-500/50 bg-sky-900/60 text-xs text-sky-200">
+        <span>📡</span>
+        <span>Data source: API-Basketball (Pro)</span>
+      </div>
+
       <h1 className="text-2xl font-bold mb-2">📅 Today&apos;s NBA Slate</h1>
       <p className="text-sm text-gray-300 mb-4">
         Data from API-Basketball — showing today&apos;s scheduled games.

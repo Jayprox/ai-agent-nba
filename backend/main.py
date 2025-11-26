@@ -24,24 +24,31 @@ _handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
 if not logger.handlers:
     logger.addHandler(_handler)
 
+
 # -------------------------------------------------
 # ⚙️ Config helpers
 # -------------------------------------------------
 def _parse_allowed_origins() -> List[str]:
     """
     Returns a list of allowed frontend origins for CORS.
-    Includes both localhost and 127.0.0.1 for ports 3000 and 5173 by default.
+    Reads ALLOWED_ORIGINS from .env or falls back to common dev URLs.
     """
-    origins_env = os.getenv("ALLOWED_ORIGINS", "")
-    if not origins_env.strip():
-        return [
+    origins_env = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if origins_env:
+        origins = [o.strip() for o in origins_env.split(",") if o.strip()]
+    else:
+        origins = [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
             "http://localhost:5173",
             "http://127.0.0.1:5173",
-            "http://127.0.0.1:8000"
+            "http://192.168.0.116:5173",  # your LAN dev URL
         ]
-    return [origin.strip() for origin in origins_env.split(",") if origin.strip()]
+
+    logger.info("🔐 CORS allowed origins:")
+    for o in origins:
+        logger.info(f"   - {o}")
+    return origins
 
 
 OPENAI_OK = bool(os.getenv("OPENAI_API_KEY"))
@@ -51,9 +58,9 @@ ALLOWED_ORIGINS = _parse_allowed_origins()
 
 logger.info("🔐 Environment variables loaded:")
 logger.info(f"  OPENAI_API_KEY: {'✅ Loaded' if OPENAI_OK else '❌ Missing'}")
-logger.info(f"  ODDS_API_KEY: {'✅ Loaded' if ODDS_OK else '❌ Missing'}")
+logger.info(f"  ODDS_API_KEY:   {'✅ Loaded' if ODDS_OK else '❌ Missing'}")
 logger.info(f"  TZ: {TZ}")
-logger.info(f"  ALLOWED_ORIGINS: {ALLOWED_ORIGINS}")
+
 
 # -------------------------------------------------
 # ⚙️ FastAPI app setup
@@ -65,11 +72,11 @@ app = FastAPI(
 )
 
 # -------------------------------------------------
-# 🌐 CORS Middleware (Wildcard Dev Mode)
+# 🌐 CORS Middleware
 # -------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -86,6 +93,7 @@ from routes import nba_games_today, narrative  # noqa: E402
 app.include_router(nba_games_today.router)
 app.include_router(narrative.router)
 
+
 # -------------------------------------------------
 # 🏠 Root endpoint
 # -------------------------------------------------
@@ -100,9 +108,10 @@ async def root():
             "narrative_today": "/nba/narrative/today",
             "narrative_markdown": "/nba/narrative/markdown",
             "games_today": "/nba/games/today",
-            "docs": "/docs"
-        }
+            "docs": "/docs",
+        },
     }
+
 
 # -------------------------------------------------
 # 🧪 Health check endpoint
@@ -115,6 +124,6 @@ async def health_check():
         "environment": {
             "openai_configured": OPENAI_OK,
             "odds_configured": ODDS_OK,
-            "timezone": TZ
-        }
+            "timezone": TZ,
+        },
     }
