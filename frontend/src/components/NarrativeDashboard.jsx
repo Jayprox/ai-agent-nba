@@ -1,5 +1,5 @@
 // frontend/src/components/NarrativeDashboard.jsx
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
@@ -107,6 +107,15 @@ function pickTimezone(games, metaTz) {
   );
 }
 
+function parseTrendsOverride(value) {
+  // null => default/env behavior (no query param)
+  // true => trends=1
+  // false => trends=0
+  if (value === "1" || value === 1 || value === true) return true;
+  if (value === "0" || value === 0 || value === false) return false;
+  return null;
+}
+
 const NarrativeDashboard = () => {
   const [markdown, setMarkdown] = useState("");
   const [meta, setMeta] = useState({});
@@ -118,18 +127,36 @@ const NarrativeDashboard = () => {
   const [error, setError] = useState(null);
   const [isRegenerating, setIsRegenerating] = useState(false);
 
-  const fetchMarkdown = async (forceRefresh = false) => {
+  // F4: frontend control for trends param:
+  // null = default/env, true = force ON (trends=1), false = force OFF (trends=0)
+  const [trendsOverride, setTrendsOverride] = useState(null);
+
+  const trendsLabel = useMemo(() => {
+    if (trendsOverride === true) return "ON (forced)";
+    if (trendsOverride === false) return "OFF (forced)";
+    return "DEFAULT (env)";
+  }, [trendsOverride]);
+
+  const fetchMarkdown = async (forceRefresh = false, override = trendsOverride) => {
     setLoading(true);
     setError(null);
 
     try {
-      const url = `${API_BASE}/nba/narrative/markdown?mode=ai${
-        forceRefresh ? "&cache_ttl=0" : ""
-      }`;
-      console.log("🔍 [NarrativeDashboard D1] Fetching from:", url);
+      const params = new URLSearchParams();
+      params.set("mode", "ai");
+
+      // Respect force refresh
+      if (forceRefresh) params.set("cache_ttl", "0");
+
+      // Only include trends param if override is not null
+      if (override === true) params.set("trends", "1");
+      if (override === false) params.set("trends", "0");
+
+      const url = `${API_BASE}/nba/narrative/markdown?${params.toString()}`;
+      console.log("🔍 [NarrativeDashboard D2] Fetching from:", url);
 
       const res = await fetch(url);
-      console.log("📡 [NarrativeDashboard D1] Response status:", res.status);
+      console.log("📡 [NarrativeDashboard D2] Response status:", res.status);
 
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
 
@@ -146,7 +173,7 @@ const NarrativeDashboard = () => {
       const rm = data.raw?.meta || {};
       setRawMeta(rm);
 
-      // ✅ Step D update: robustly pull games array regardless of backend key naming
+      // ✅ Step D: robustly pull games array regardless of backend key naming
       const safeGames = pickGamesArray(data);
       setGamesToday(safeGames);
 
@@ -159,9 +186,20 @@ const NarrativeDashboard = () => {
 
       setGamesTodayCount(count);
 
-      console.log("✅ [NarrativeDashboard D1] Loaded. games_today_count =", count);
+      // Keep our local state in sync with what backend reports, if present
+      // (backend returns raw.meta.trends_override as true/false/null)
+      if (Object.prototype.hasOwnProperty.call(rm || {}, "trends_override")) {
+        setTrendsOverride(parseTrendsOverride(rm?.trends_override));
+      }
+
+      console.log(
+        "✅ [NarrativeDashboard D2] Loaded. games_today_count =",
+        count,
+        "| trends_override =",
+        rm?.trends_override
+      );
     } catch (err) {
-      console.error("❌ [NarrativeDashboard D1] Fetch error:", err);
+      console.error("❌ [NarrativeDashboard D2] Fetch error:", err);
       setError(err.message || "Failed to load narrative");
     } finally {
       setLoading(false);
@@ -170,10 +208,16 @@ const NarrativeDashboard = () => {
   };
 
   useEffect(() => {
-    console.log("🧩 [NarrativeDashboard D1] Component mounted. API_BASE =", API_BASE);
+    console.log("🧩 [NarrativeDashboard D2] Component mounted. API_BASE =", API_BASE);
     fetchMarkdown();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const onSetTrends = (nextOverride) => {
+    setTrendsOverride(nextOverride);
+    // immediately refresh narrative using the new override
+    fetchMarkdown(true, nextOverride);
+  };
 
   if (loading)
     return (
@@ -198,9 +242,11 @@ const NarrativeDashboard = () => {
   const slateTz = pickTimezone(gamesToday, rawMeta?.timezone);
   const matchups = buildMatchups(gamesToday, 5);
 
+  const backendTrendsEnabled = !!rawMeta?.trends_enabled_in_narrative;
+
   return (
     <div style={{ padding: 24, color: "white", maxWidth: 980, margin: "0 auto" }}>
-      {/* Header + Regenerate */}
+      {/* Header + Actions */}
       <div
         style={{
           display: "flex",
@@ -208,10 +254,11 @@ const NarrativeDashboard = () => {
           justifyContent: "space-between",
           gap: 12,
           marginBottom: 16,
+          flexWrap: "wrap",
         }}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>
               AI Narrative Dashboard
             </h1>
@@ -224,32 +271,110 @@ const NarrativeDashboard = () => {
                 background: "#0b1220",
               }}
             >
-              Version: D1
+              Version: D2
             </span>
           </div>
           <div style={{ fontSize: 12, color: "#9ca3af" }}>
-            This header confirms the updated component is rendering.
+            Frontend trends toggle wired to <code style={{ color: "#e5e7eb" }}>trends=0/1</code>.
           </div>
         </div>
 
-        <button
-          onClick={() => {
-            setIsRegenerating(true);
-            fetchMarkdown(true);
-          }}
-          disabled={isRegenerating}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            fontWeight: 700,
-            border: "1px solid #334155",
-            background: isRegenerating ? "#111827" : "#2563eb",
-            color: isRegenerating ? "#9ca3af" : "white",
-            cursor: isRegenerating ? "not-allowed" : "pointer",
-          }}
-        >
-          {isRegenerating ? "Generating..." : "Regenerate Narrative"}
-        </button>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          {/* F4: Trends toggle */}
+          <div
+            style={{
+              display: "flex",
+              gap: 6,
+              alignItems: "center",
+              padding: 6,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              background: "rgba(11,18,32,0.85)",
+            }}
+          >
+            <span style={{ fontSize: 12, color: "#9ca3af", paddingLeft: 6 }}>
+              Trends:
+            </span>
+
+            <button
+              onClick={() => onSetTrends(null)}
+              disabled={isRegenerating}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                fontWeight: 800,
+                fontSize: 12,
+                border: "1px solid #334155",
+                background: trendsOverride === null ? "#1f2937" : "transparent",
+                color: trendsOverride === null ? "white" : "#e5e7eb",
+                cursor: isRegenerating ? "not-allowed" : "pointer",
+              }}
+              title="Use backend default / env behavior (no trends query param)"
+            >
+              Default
+            </button>
+
+            <button
+              onClick={() => onSetTrends(true)}
+              disabled={isRegenerating}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                fontWeight: 800,
+                fontSize: 12,
+                border: "1px solid #334155",
+                background: trendsOverride === true ? "#064e3b" : "transparent",
+                color: trendsOverride === true ? "#d1fae5" : "#e5e7eb",
+                cursor: isRegenerating ? "not-allowed" : "pointer",
+              }}
+              title="Force trends ON (adds trends=1)"
+            >
+              On
+            </button>
+
+            <button
+              onClick={() => onSetTrends(false)}
+              disabled={isRegenerating}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                fontWeight: 800,
+                fontSize: 12,
+                border: "1px solid #334155",
+                background: trendsOverride === false ? "#7f1d1d" : "transparent",
+                color: trendsOverride === false ? "#fee2e2" : "#e5e7eb",
+                cursor: isRegenerating ? "not-allowed" : "pointer",
+              }}
+              title="Force trends OFF (adds trends=0)"
+            >
+              Off
+            </button>
+
+            <span style={{ fontSize: 12, color: "#9ca3af", paddingRight: 6 }}>
+              {trendsLabel}
+            </span>
+          </div>
+
+          {/* Regenerate */}
+          <button
+            onClick={() => {
+              setIsRegenerating(true);
+              fetchMarkdown(true);
+            }}
+            disabled={isRegenerating}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 10,
+              fontWeight: 700,
+              border: "1px solid #334155",
+              background: isRegenerating ? "#111827" : "#2563eb",
+              color: isRegenerating ? "#9ca3af" : "white",
+              cursor: isRegenerating ? "not-allowed" : "pointer",
+            }}
+          >
+            {isRegenerating ? "Generating..." : "Regenerate Narrative"}
+          </button>
+        </div>
       </div>
 
       {/* Slate Header (Step D) */}
@@ -286,7 +411,14 @@ const NarrativeDashboard = () => {
               <span style={{ margin: "0 8px" }}>•</span>
               Trends in narrative:{" "}
               <span style={{ color: "white", fontWeight: 800 }}>
-                {rawMeta?.trends_enabled_in_narrative ? "ON" : "OFF"}
+                {backendTrendsEnabled ? "ON" : "OFF"}
+              </span>
+              <span style={{ margin: "0 8px" }}>•</span>
+              Override:{" "}
+              <span style={{ color: "white", fontWeight: 800 }}>
+                {rawMeta?.trends_override === null || rawMeta?.trends_override === undefined
+                  ? "None"
+                  : String(rawMeta?.trends_override)}
               </span>
             </div>
           </div>
