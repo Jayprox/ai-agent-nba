@@ -82,6 +82,14 @@ const Navbar = () => {
       >
         Player Insights
       </NavLink>
+      <NavLink
+        to="/narrative-dashboard"
+        style={({ isActive }) =>
+          isActive ? { ...linkStyle, ...activeStyle } : linkStyle
+        }
+      >
+        Narrative Dashboard
+      </NavLink>
     </nav>
   );
 };
