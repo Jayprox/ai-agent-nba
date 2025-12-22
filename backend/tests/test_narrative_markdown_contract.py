@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,17 +21,14 @@ from main import app  # noqa: E402
 from routes import narrative as narrative_route  # noqa: E402
 
 
-@pytest.mark.parametrize("mode", ["ai", "template"])
-def test_narrative_markdown_contract(monkeypatch, mode: str):
+def _install_common_stubs(monkeypatch):
     """
-    Contract test for /nba/narrative/markdown:
-      - returns ok=true
-      - includes required top-level keys
-      - includes required raw keys (including games_today)
-      - markdown is present and non-empty
+    Install stubs so tests are offline/CI safe and deterministic.
+    """
 
-    All external/expensive calls are stubbed so this can run offline/CI.
-    """
+    # Make behavior deterministic even if developer env sets ENABLE_TRENDS_IN_NARRATIVE=0/1.
+    # (Overrides still win for trends=0 / trends=1.)
+    monkeypatch.setattr(narrative_route, "_ENV_ENABLE_TRENDS", True, raising=False)
 
     # -----------------------------
     # Stub: narrative generator (AI/template)
@@ -51,7 +49,7 @@ def test_narrative_markdown_contract(monkeypatch, mode: str):
     )
 
     # -----------------------------
-    # Stub: odds must be a dict-like object (because your code does odds.get("games"))
+    # Stub: odds (must be dict-like because route does (odds or {}).get("games"))
     # -----------------------------
     def fake_fetch_moneyline_odds(*args, **kwargs):
         return {"games": []}
@@ -64,15 +62,79 @@ def test_narrative_markdown_contract(monkeypatch, mode: str):
     )
 
     # -----------------------------
-    # Stub: trends summary (even if narrative currently disables trends via C1,
-    # this prevents any accidental agent calls during refactors)
+    # Stub: API-Basketball games (awaitable in the route)
     # -----------------------------
-    def fake_get_trends_summary(*args, **kwargs):
-        class _T:
-            team_trends = []
-            player_trends = []
+    async def fake_get_today_games(*args, **kwargs):
+        return [
+            {
+                "id": 1,
+                "date": "2025-12-17T17:00:00-08:00",
+                "timestamp": 1766029200,
+                "timezone": "America/Los_Angeles",
+                "home_team": {"name": "Home Team"},
+                "away_team": {"name": "Away Team"},
+                "status": {"long": "Not Started", "short": "NS", "timer": None},
+                "league": {
+                    "id": 12,
+                    "name": "NBA",
+                    "season": "2025-2026",
+                    "type": "League",
+                },
+                "venue": "Test Arena",
+            }
+        ]
 
-        return _T()
+    monkeypatch.setattr(
+        narrative_route,
+        "get_today_games",
+        fake_get_today_games,
+        raising=False,
+    )
+
+    # -----------------------------
+    # Stub: trends summary
+    # Route expects objects with .model_dump()
+    # -----------------------------
+    class _FakeTrend:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def model_dump(self):
+            return dict(self._payload)
+
+    def fake_get_trends_summary(*args, **kwargs):
+        player_trends_list = [
+            _FakeTrend(
+                {
+                    "player_name": "LeBron James",
+                    "stat_type": "points",
+                    "average": 25.0,
+                    "trend_direction": "up",
+                    "last_n_games": 5,
+                }
+            ),
+            _FakeTrend(
+                {
+                    "player_name": "Stephen Curry",
+                    "stat_type": "points",
+                    "average": 29.0,
+                    "trend_direction": "neutral",
+                    "last_n_games": 5,
+                }
+            ),
+            _FakeTrend(
+                {
+                    "player_name": "Luka Doncic",
+                    "stat_type": "assists",
+                    "average": 10.0,
+                    "trend_direction": "down",
+                    "last_n_games": 5,
+                }
+            ),
+        ]
+
+        # SimpleNamespace avoids any class-body scoping issues across Python versions.
+        return SimpleNamespace(team_trends=[], player_trends=player_trends_list)
 
     monkeypatch.setattr(
         narrative_route,
@@ -81,9 +143,18 @@ def test_narrative_markdown_contract(monkeypatch, mode: str):
         raising=False,
     )
 
-    # -----------------------------
-    # Execute
-    # -----------------------------
+
+@pytest.mark.parametrize("mode", ["ai", "template"])
+def test_narrative_markdown_contract(monkeypatch, mode: str):
+    """
+    Contract test for /nba/narrative/markdown:
+      - returns ok=true
+      - includes required top-level keys
+      - includes required raw keys (including games_today)
+      - markdown is present and non-empty
+    """
+    _install_common_stubs(monkeypatch)
+
     client = TestClient(app)
     res = client.get(f"/nba/narrative/markdown?mode={mode}&cache_ttl=0")
     assert res.status_code == 200
@@ -122,3 +193,52 @@ def test_narrative_markdown_contract(monkeypatch, mode: str):
     md = data["markdown"]
     assert "**NBA Narrative**" in md
     assert "Macro Summary" in md
+
+
+@pytest.mark.parametrize(
+    "query, expected_override, expected_enabled, expected_min_player_trends",
+    [
+        ("&trends=0", False, False, 0),
+        ("&trends=1", True, True, 1),
+    ],
+)
+def test_trends_override_contract_and_effect(
+    monkeypatch,
+    query: str,
+    expected_override,
+    expected_enabled: bool,
+    expected_min_player_trends: int,
+):
+    """
+    Contract coverage for trends overrides:
+      - raw.meta.trends_override is set when trends query param is provided
+      - raw.meta.trends_enabled_in_narrative follows the override
+      - raw.player_trends length reflects enabled/disabled (0 when off, >0 when on)
+    """
+    _install_common_stubs(monkeypatch)
+
+    client = TestClient(app)
+    res = client.get(f"/nba/narrative/markdown?mode=ai&cache_ttl=0{query}")
+    assert res.status_code == 200
+
+    data = res.json()
+    assert data.get("ok") is True, data
+
+    raw = data.get("raw") or {}
+    assert isinstance(raw, dict)
+
+    meta = raw.get("meta") or {}
+    assert isinstance(meta, dict)
+
+    # Override contract
+    assert meta.get("trends_override") == expected_override
+
+    # Enabled flag contract
+    assert meta.get("trends_enabled_in_narrative") is expected_enabled
+
+    # Effect contract
+    player_trends = raw.get("player_trends", [])
+    assert isinstance(player_trends, list)
+    assert len(player_trends) >= expected_min_player_trends
+    if expected_enabled is False:
+        assert len(player_trends) == 0

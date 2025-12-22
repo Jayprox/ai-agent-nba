@@ -7,12 +7,13 @@ import TrendsPage from "./components/TrendsPage";
 import Odds from "./components/Odds"; // ✅ use the updated Odds.jsx
 import PlayerPerformancePage from "./components/PlayerPerformancePage";
 import PlayerTrendsPage from "./components/PlayerTrendsPage";
-import PlayerInsightsPage from "./components/PlayerInsightsPape"; // NOTE: verify filename matches (possible typo)
+import PlayerInsightsPage from "./components/PlayerInsightsPage";
 import TeamSummary from "./components/TeamSummary";
 import PlayerLive from "./components/PlayerLive";
 import PlayerLiveCombined from "./components/PlayerLiveCombined";
 import LiveDashboard from "./components/LiveDashboard";
 import NarrativeDashboard from "./components/NarrativeDashboard";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 function App() {
   return (
@@ -40,7 +41,14 @@ function App() {
           <Route path="/player-live-combined" element={<PlayerLiveCombined />} />
           <Route path="/live-dashboard" element={<LiveDashboard />} />
 
-          <Route path="/narrative-dashboard" element={<NarrativeDashboard />} />
+          <Route path="/narrative-dashboard" element={
+            <ErrorBoundary 
+              title="Narrative Dashboard crashed" 
+              subtitle="An error occurred while loading the Narrative Dashboard. Please try again."
+            >
+              <NarrativeDashboard />
+            </ErrorBoundary>
+          } />
 
           {/* Optional fallback */}
           <Route path="*" element={<Navigate to="/odds" replace />} />
