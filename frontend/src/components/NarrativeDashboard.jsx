@@ -256,6 +256,37 @@ function loadCacheTtlFromStorage() {
   }
 }
 
+async function copyToClipboard(text) {
+  const value = String(text ?? "");
+  if (!value) return false;
+
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // fall through
+  }
+
+  // Fallback
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = value;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.left = "-1000px";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 const NarrativeDashboard = () => {
   const [markdown, setMarkdown] = useState("");
   const [meta, setMeta] = useState({});
@@ -277,6 +308,13 @@ const NarrativeDashboard = () => {
   );
   const [compact, setCompact] = useState(() => loadCompactFromStorage());
   const [cacheTtl, setCacheTtl] = useState(() => loadCacheTtlFromStorage());
+
+  // Last-good snapshot (used to avoid "blank page" on error)
+  const [lastGood, setLastGood] = useState(null);
+
+  // Copy feedback
+  const [copyStatus, setCopyStatus] = useState(null); // string | null
+  const copyTimerRef = useRef(null);
 
   // Latest-request-wins + abort
   const requestIdRef = useRef(0);
@@ -301,6 +339,32 @@ const NarrativeDashboard = () => {
       // no-op
     }
   }, [trendsOverride, compact, cacheTtl]);
+
+  // Abort fetch on unmount
+  useEffect(() => {
+    return () => {
+      try {
+        if (abortRef.current) abortRef.current.abort();
+      } catch {
+        // no-op
+      }
+      try {
+        if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      } catch {
+        // no-op
+      }
+    };
+  }, []);
+
+  const flashCopyStatus = (msg) => {
+    setCopyStatus(msg);
+    try {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopyStatus(null), 1200);
+    } catch {
+      // no-op
+    }
+  };
 
   const fetchMarkdown = async (opts = {}) => {
     const {
@@ -345,7 +409,7 @@ const NarrativeDashboard = () => {
 
       const url = `${API_BASE}/nba/narrative/markdown?${params.toString()}`;
 
-      console.log("🔍 [NarrativeDashboard D6] Fetching:", {
+      console.log("🔍 [NarrativeDashboard D7] Fetching:", {
         url,
         reason,
         requestId: myRequestId,
@@ -359,54 +423,66 @@ const NarrativeDashboard = () => {
 
       // If another request has started since this one, ignore this response
       if (myRequestId !== requestIdRef.current) {
-        console.log("🟡 [NarrativeDashboard D6] Stale response ignored:", myRequestId);
+        console.log("🟡 [NarrativeDashboard D7] Stale response ignored:", myRequestId);
         return;
       }
 
       if (!data.ok) throw new Error(data.error || "Backend returned ok: false");
       if (!data.markdown) throw new Error("No markdown field in response");
 
-      setMarkdown(data.markdown);
-
       const md = data.summary?.metadata || {};
-      setMeta(md);
-
       const rm = data.raw?.meta || {};
-      setRawMeta(rm);
-
       const safeGames = pickGamesArray(data);
-      setGamesToday(safeGames);
 
       const countFromMeta =
         data.summary?.metadata?.games_today_count ??
         data.raw?.meta?.source_counts?.games_today;
 
       const count = typeof countFromMeta === "number" ? countFromMeta : safeGames.length;
-      setGamesTodayCount(count);
 
-      // trends payload
-      setPlayerTrends(safeArray(data?.raw?.player_trends));
-      setTeamTrends(safeArray(data?.raw?.team_trends));
+      const pt = safeArray(data?.raw?.player_trends);
+      const tt = safeArray(data?.raw?.team_trends);
+
+      // Commit UI state
+      setMarkdown(data.markdown);
+      setMeta(md);
+      setRawMeta(rm);
+      setGamesToday(safeGames);
+      setGamesTodayCount(count);
+      setPlayerTrends(pt);
+      setTeamTrends(tt);
+
+      // Update last-good snapshot
+      setLastGood({
+        markdown: data.markdown,
+        meta: md,
+        rawMeta: rm,
+        gamesToday: safeGames,
+        gamesTodayCount: count,
+        playerTrends: pt,
+        teamTrends: tt,
+        savedAt: new Date().toISOString(),
+      });
 
       // Sync local toggle state with backend, if present
       if (Object.prototype.hasOwnProperty.call(rm || {}, "trends_override")) {
         setTrendsOverride(parseTrendsOverride(rm?.trends_override));
       }
 
-      console.log("✅ [NarrativeDashboard D6] Loaded:", {
+      console.log("✅ [NarrativeDashboard D7] Loaded:", {
         requestId: myRequestId,
         games_today_count: count,
         trends_override: rm?.trends_override,
         trends_enabled_in_narrative: rm?.trends_enabled_in_narrative,
-        player_trends_len: safeArray(data?.raw?.player_trends).length,
-        team_trends_len: safeArray(data?.raw?.team_trends).length,
+        player_trends_len: pt.length,
+        team_trends_len: tt.length,
       });
     } catch (err) {
       if (err?.name === "AbortError") {
-        console.log("🟡 [NarrativeDashboard D6] Fetch aborted (expected).");
+        console.log("🟡 [NarrativeDashboard D7] Fetch aborted (expected).");
         return;
       }
-      console.error("❌ [NarrativeDashboard D6] Fetch error:", err);
+      console.error("❌ [NarrativeDashboard D7] Fetch error:", err);
 
       // If stale, ignore setting error/loading
       if (myRequestId !== requestIdRef.current) return;
@@ -422,7 +498,7 @@ const NarrativeDashboard = () => {
   };
 
   useEffect(() => {
-    console.log("🧩 [NarrativeDashboard D6] Mount. API_BASE =", API_BASE);
+    console.log("🧩 [NarrativeDashboard D7] Mount. API_BASE =", API_BASE);
     fetchMarkdown({ reason: "mount" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -446,12 +522,38 @@ const NarrativeDashboard = () => {
     fetchMarkdown({ forceRefresh: true, override: nextOverride, reason: "trends-toggle" });
   };
 
+  const onRetry = () => {
+    setIsRegenerating(true);
+    fetchMarkdown({ forceRefresh: true, reason: "retry" });
+  };
+
+  const onCopyMarkdown = async (text) => {
+    const ok = await copyToClipboard(text);
+    flashCopyStatus(ok ? "Copied" : "Copy failed");
+  };
+
   // -----------------------------
   // Derived values (NO HOOKS)
   // These must be safe even during loading/error renders.
   // -----------------------------
-  const safePlayerTrends = safeArray(playerTrends);
-  const safeTeamTrends = safeArray(teamTrends);
+  const displayMarkdown = markdown || lastGood?.markdown || "";
+  const displayMeta = Object.keys(meta || {}).length ? meta : lastGood?.meta || {};
+  const displayRawMeta =
+    Object.keys(rawMeta || {}).length ? rawMeta : lastGood?.rawMeta || {};
+  const displayGamesToday = Array.isArray(gamesToday) && gamesToday.length
+    ? gamesToday
+    : lastGood?.gamesToday || [];
+  const displayGamesTodayCount =
+    typeof gamesTodayCount === "number" && gamesTodayCount > 0
+      ? gamesTodayCount
+      : lastGood?.gamesTodayCount || 0;
+
+  const safePlayerTrends = safeArray(
+    (Array.isArray(playerTrends) && playerTrends.length ? playerTrends : lastGood?.playerTrends) || []
+  );
+  const safeTeamTrends = safeArray(
+    (Array.isArray(teamTrends) && teamTrends.length ? teamTrends : lastGood?.teamTrends) || []
+  );
 
   const playerTrendsTop = safePlayerTrends.slice(0, 5);
   const teamTrendsTop = safeTeamTrends.slice(0, 5);
@@ -459,14 +561,14 @@ const NarrativeDashboard = () => {
   const playerTrendsCount = safePlayerTrends.length;
   const teamTrendsCount = safeTeamTrends.length;
 
-  const backendTrendsEnabled = !!rawMeta?.trends_enabled_in_narrative;
-  const trendsSoftError = rawMeta?.soft_errors?.trends || null;
+  const backendTrendsEnabled = !!displayRawMeta?.trends_enabled_in_narrative;
+  const trendsSoftError = displayRawMeta?.soft_errors?.trends || null;
 
   // Contract snapshot fields
-  const latencyMs = formatMaybeNumber(rawMeta?.latency_ms);
-  const cacheUsed = rawMeta?.cache_used;
-  const cacheTtlS = rawMeta?.cache_ttl_s;
-  const sourceCounts = rawMeta?.source_counts || {};
+  const latencyMs = formatMaybeNumber(displayRawMeta?.latency_ms);
+  const cacheUsed = displayRawMeta?.cache_used;
+  const cacheTtlS = displayRawMeta?.cache_ttl_s;
+  const sourceCounts = displayRawMeta?.source_counts || {};
   const scGames = sourceCounts?.games_today;
   const scPlayerTrends = sourceCounts?.player_trends;
   const scTeamTrends = sourceCounts?.team_trends;
@@ -479,22 +581,82 @@ const NarrativeDashboard = () => {
     );
   }
 
-  if (error) {
+  // If we have no last-good and no markdown to show, then a hard error view is reasonable.
+  if (error && !displayMarkdown) {
     return (
       <div style={{ padding: 16, color: "#fca5a5" }}>
         <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>❌ Error</h2>
-        <p>{error}</p>
+        <p style={{ marginBottom: 12 }}>{error}</p>
+        <button
+          onClick={onRetry}
+          disabled={isRegenerating}
+          style={{
+            padding: "10px 14px",
+            borderRadius: 10,
+            fontWeight: 800,
+            border: "1px solid #334155",
+            background: isRegenerating ? "#111827" : "#2563eb",
+            color: isRegenerating ? "#9ca3af" : "white",
+            cursor: isRegenerating ? "not-allowed" : "pointer",
+          }}
+        >
+          {isRegenerating ? "Retrying..." : "Retry"}
+        </button>
       </div>
     );
   }
 
-  const generatedAt = safeToLocalString(meta?.generated_at);
-  const slateDateLabel = guessSlateDateLabel(gamesToday);
-  const slateTz = pickTimezone(gamesToday, rawMeta?.timezone);
-  const matchups = buildMatchups(gamesToday, 5);
+  const generatedAt = safeToLocalString(displayMeta?.generated_at);
+  const slateDateLabel = guessSlateDateLabel(displayGamesToday);
+  const slateTz = pickTimezone(displayGamesToday, displayRawMeta?.timezone);
+  const matchups = buildMatchups(displayGamesToday, 5);
 
   return (
     <div style={{ padding: 24, color: "white", maxWidth: 980, margin: "0 auto" }}>
+      {/* Error banner (but keep rendering last-good) */}
+      {error ? (
+        <div
+          style={{
+            marginBottom: 14,
+            borderRadius: 14,
+            border: "1px solid rgba(239,68,68,0.35)",
+            background: "rgba(185,28,28,0.15)",
+            padding: 12,
+            color: "#fecaca",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12 }}>
+              <span style={{ fontWeight: 900 }}>Fetch failed:</span> {String(error)}
+              {lastGood?.savedAt ? (
+                <span style={{ color: "#cbd5e1" }}>
+                  {" "}
+                  • Showing last successful narrative from{" "}
+                  <span style={{ fontWeight: 900, color: "white" }}>
+                    {safeToLocalString(lastGood.savedAt)}
+                  </span>
+                </span>
+              ) : null}
+            </div>
+
+            <button
+              onClick={onRetry}
+              disabled={isRegenerating}
+              style={{
+                ...btnBase,
+                padding: "8px 12px",
+                background: isRegenerating ? "#111827" : "rgba(239,68,68,0.15)",
+                color: isRegenerating ? "#9ca3af" : "#fee2e2",
+                cursor: isRegenerating ? "not-allowed" : "pointer",
+              }}
+              title="Retry (force refresh)"
+            >
+              {isRegenerating ? "Retrying..." : "Retry"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {/* Header + Actions */}
       <div
         style={{
@@ -520,11 +682,27 @@ const NarrativeDashboard = () => {
                 background: "#0b1220",
               }}
             >
-              Version: D6
+              Version: D7
             </span>
+
+            {copyStatus ? (
+              <span
+                style={{
+                  fontSize: 12,
+                  padding: "3px 8px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(148,163,184,0.35)",
+                  background: "rgba(148,163,184,0.12)",
+                  color: "#e5e7eb",
+                }}
+              >
+                {copyStatus}
+              </span>
+            ) : null}
           </div>
+
           <div style={{ fontSize: 12, color: "#9ca3af" }}>
-            Fixed hooks crash (no hooks after early returns). Controls:{" "}
+            Resilient UI: Retry + last-good fallback + copy tools. Controls:{" "}
             <code style={{ color: "#e5e7eb" }}>trends</code>,{" "}
             <code style={{ color: "#e5e7eb" }}>compact</code>,{" "}
             <code style={{ color: "#e5e7eb" }}>cache_ttl</code>.
@@ -532,6 +710,23 @@ const NarrativeDashboard = () => {
         </div>
 
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          {/* Copy buttons */}
+          <button
+            onClick={() => onCopyMarkdown(displayMarkdown)}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 10,
+              fontWeight: 800,
+              border: "1px solid #334155",
+              background: "rgba(11,18,32,0.85)",
+              color: "#e5e7eb",
+              cursor: "pointer",
+            }}
+            title="Copy the rendered markdown to clipboard"
+          >
+            Copy Markdown
+          </button>
+
           {/* Trends toggle */}
           <div
             style={{
@@ -696,7 +891,9 @@ const NarrativeDashboard = () => {
             </div>
             <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 4 }}>
               Games:{" "}
-              <span style={{ color: "white", fontWeight: 800 }}>{gamesTodayCount}</span>{" "}
+              <span style={{ color: "white", fontWeight: 800 }}>
+                {displayGamesTodayCount}
+              </span>{" "}
               <span style={{ margin: "0 8px" }}>•</span>
               Timezone:{" "}
               <span style={{ color: "white", fontWeight: 800 }}>{slateTz}</span>{" "}
@@ -708,9 +905,10 @@ const NarrativeDashboard = () => {
               <span style={{ margin: "0 8px" }}>•</span>
               Override:{" "}
               <span style={{ color: "white", fontWeight: 800 }}>
-                {rawMeta?.trends_override === null || rawMeta?.trends_override === undefined
+                {displayRawMeta?.trends_override === null ||
+                displayRawMeta?.trends_override === undefined
                   ? "None"
-                  : String(rawMeta?.trends_override)}
+                  : String(displayRawMeta?.trends_override)}
               </span>
             </div>
           </div>
@@ -728,7 +926,7 @@ const NarrativeDashboard = () => {
             >
               Source: API-Basketball
             </span>
-            <span style={{ ...pillStyle }}>Mode: {rawMeta?.mode || "ai"}</span>
+            <span style={{ ...pillStyle }}>Mode: {displayRawMeta?.mode || "ai"}</span>
           </div>
         </div>
 
@@ -772,7 +970,14 @@ const NarrativeDashboard = () => {
           padding: 14,
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 10,
+            flexWrap: "wrap",
+          }}
+        >
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <div style={{ fontSize: 14, fontWeight: 900 }}>Contract Snapshot</div>
             <div style={{ fontSize: 12, color: "#9ca3af" }}>
@@ -1066,18 +1271,34 @@ const NarrativeDashboard = () => {
         <div>
           Model:{" "}
           <span style={{ color: "#e5e7eb", fontWeight: 700 }}>
-            {meta?.model || "Unknown"}
+            {displayMeta?.model || "Unknown"}
           </span>
         </div>
         <div>
           Generated:{" "}
           <span style={{ color: "#e5e7eb", fontWeight: 700 }}>{generatedAt}</span>
         </div>
-        <div>
-          Digest:{" "}
-          <span style={{ color: "#e5e7eb", fontWeight: 700 }}>
-            {meta?.inputs_digest || "—"}
-          </span>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <div>
+            Digest:{" "}
+            <span style={{ color: "#e5e7eb", fontWeight: 700 }}>
+              {displayMeta?.inputs_digest || "—"}
+            </span>
+          </div>
+
+          <button
+            onClick={() => onCopyMarkdown(displayMeta?.inputs_digest || "")}
+            style={{
+              ...btnBase,
+              padding: "6px 10px",
+              background: "rgba(11,18,32,0.85)",
+              color: "#e5e7eb",
+              cursor: "pointer",
+            }}
+            title="Copy inputs_digest"
+          >
+            Copy Digest
+          </button>
         </div>
       </div>
 
@@ -1092,7 +1313,7 @@ const NarrativeDashboard = () => {
           overflow: "auto",
         }}
       >
-        <ReactMarkdown>{markdown}</ReactMarkdown>
+        <ReactMarkdown>{displayMarkdown}</ReactMarkdown>
       </div>
     </div>
   );
