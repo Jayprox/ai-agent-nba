@@ -1,9 +1,10 @@
 # backend/services/openai_service.py
+
 import os
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from openai import OpenAI, OpenAIError
 
@@ -101,10 +102,8 @@ def _try_parse_json(text: str) -> Dict[str, Any]:
     cleaned = raw
     if cleaned.startswith("```"):
         cleaned = cleaned.strip().lstrip("`")
-        # remove possible "json" label line
         cleaned = cleaned.replace("json\n", "", 1)
         cleaned = cleaned.replace("JSON\n", "", 1)
-        # remove trailing fences
         cleaned = cleaned.replace("```", "").strip()
 
     try:
@@ -128,40 +127,51 @@ def _try_parse_json(text: str) -> Dict[str, Any]:
     raise ValueError("Could not parse valid JSON from AI output")
 
 
-def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
+def _fallback_template(ai_error: str, model: str = "NBA_Template_Fallback") -> Dict[str, Any]:
     """
-    Grounded narrative generator.
-    Uses response_format JSON mode + robust parsing to prevent invalid-JSON fallbacks.
+    Standard fallback narrative structure. Consumers can render markdown from this safely.
     """
-
-    fallback_template = {
+    return {
         "macro_summary": (
-            "The current NBA slate is available, but AI narrative generation is not enabled. "
-            "Use the schedule page for matchup context and revisit once AI is configured."
+            "The current NBA slate is available, but AI narrative generation could not be completed. "
+            "This response is a safe fallback."
         ),
         "micro_summary": {
             "key_edges": [],
             "risk_score": 0.0,
-            "risk_rationale": "Template mode.",
+            "risk_rationale": "Fallback mode.",
         },
-        "analyst_takeaway": "Enable AI mode (OPENAI_API_KEY) to generate a grounded narrative.",
-        "confidence_summary": ["Medium"],
+        "analyst_takeaway": (
+            "Review the slate matchups and odds sections for context. "
+            "If this was unexpected, check the backend logs for the AI soft error."
+        ),
+        "confidence_summary": ["Low"],
         "metadata": {
             "generated_at": _now_iso(),
-            "model": "NBA_Template_Fallback",
+            "model": model,
+            "ai_used": False,
+            "ai_error": ai_error,
         },
     }
 
+
+def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
+    """
+    Grounded narrative generator.
+
+    Step 2.4 support:
+    - Always returns a dict in the expected narrative shape.
+    - On any AI failure, returns a structured fallback and includes:
+        metadata.ai_used = False
+        metadata.ai_error = "<reason>"
+    """
     if mode != "ai":
-        if LOG_AI_RAW:
-            logger.info("🧩 [Fallback] mode=template → returning template narrative.")
-        return fallback_template
+        # Template mode is an intentional "non-AI" path.
+        return _fallback_template(ai_error="mode=template (AI not requested).", model="NBA_Template_Fallback")
 
     client = _get_openai_client()
     if client is None:
-        fallback_template["metadata"]["model"] = "AI_Fallback_Mode"
-        fallback_template["metadata"]["error"] = "OPENAI_API_KEY missing or OpenAI client not initialized."
-        return fallback_template
+        return _fallback_template(ai_error="OPENAI_API_KEY missing or OpenAI client not initialized.", model="AI_Fallback_Mode")
 
     games_today = data.get("games_today") or []
     slate_block = _build_slate_grounding(games_today)
@@ -177,7 +187,6 @@ def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
         "5) Output MUST be valid JSON ONLY (no markdown, no code fences).\n"
     )
 
-    # Keep the schema simple and aligned with your renderer
     schema = {
         "macro_summary": "string (2–6 sentences; reference at least 2 real matchups from the slate)",
         "micro_summary": {
@@ -206,8 +215,6 @@ def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
 
     ai_text = ""
     try:
-        # Enforce JSON mode at the API layer
-        # If the SDK/model combination doesn’t support response_format, we fall back gracefully.
         kwargs = dict(
             model="gpt-4o",
             messages=[
@@ -216,10 +223,8 @@ def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
             ],
             temperature=0.6,
             max_tokens=900,
+            response_format={"type": "json_object"},
         )
-
-        # JSON mode: strongly reduces invalid JSON responses
-        kwargs["response_format"] = {"type": "json_object"}
 
         response = client.chat.completions.create(**kwargs)
         ai_text = (response.choices[0].message.content or "").strip()
@@ -230,7 +235,7 @@ def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
 
         parsed = _try_parse_json(ai_text)
 
-        # Minimal contract hardening
+        # Minimal contract hardening (route layer will perform full validation/fallback)
         parsed.setdefault("micro_summary", {})
         if not isinstance(parsed["micro_summary"], dict):
             parsed["micro_summary"] = {}
@@ -242,9 +247,10 @@ def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
         parsed["metadata"].update({
             "generated_at": _now_iso(),
             "model": parsed["metadata"].get("model", "NBA_Data_Analyst-v1.1"),
+            "ai_used": True,
+            "ai_error": None,
         })
 
-        # Ensure required keys exist so the renderer stays stable
         parsed.setdefault("macro_summary", "")
         parsed.setdefault("analyst_takeaway", "")
         parsed.setdefault("confidence_summary", ["Medium"])
@@ -257,19 +263,18 @@ def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
     except TypeError as e:
         # response_format not supported by this SDK version/model
         logger.error(f"❌ OpenAI call failed (TypeError). response_format may be unsupported: {e}")
+        return _fallback_template(ai_error=f"OpenAI TypeError (response_format unsupported): {e}", model="AI_Fallback_Mode")
     except json.JSONDecodeError as e:
         logger.error(f"❌ AI output not valid JSON: {e}")
+        return _fallback_template(ai_error=f"AI output invalid JSON: {e}", model="AI_Fallback_Mode")
     except OpenAIError as e:
         logger.error(f"❌ OpenAI API error: {e}")
+        return _fallback_template(ai_error=f"OpenAI API error: {e}", model="AI_Fallback_Mode")
     except Exception as e:
         logger.error(f"❌ Unexpected AI generation error: {type(e).__name__}: {e}")
-
-    if LOG_AI_RAW and ai_text:
-        logger.info(f"🧠 [AI RAW OUTPUT]\n{ai_text}")
-
-    fallback_template["metadata"]["model"] = "AI_Fallback_Mode"
-    fallback_template["metadata"]["error"] = "AI generation failed or returned invalid JSON — fallback used."
-    return fallback_template
+        if LOG_AI_RAW and ai_text:
+            logger.info(f"🧠 [AI RAW OUTPUT]\n{ai_text}")
+        return _fallback_template(ai_error=f"Unexpected AI error: {type(e).__name__}: {e}", model="AI_Fallback_Mode")
 
 
 if __name__ == "__main__":

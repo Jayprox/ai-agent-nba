@@ -1,4 +1,5 @@
 # backend/tests/test_narrative_markdown_contract.py
+
 from __future__ import annotations
 
 import sys
@@ -21,23 +22,32 @@ from main import app  # noqa: E402
 from routes import narrative as narrative_route  # noqa: E402
 
 
-def _install_common_stubs(monkeypatch):
+def _install_common_stubs(monkeypatch, *, ai_allowed: bool = True):
     """
     Install stubs so tests are offline/CI safe and deterministic.
+
+    ai_allowed:
+      - True  => pretend OPENAI_API_KEY is present (baseline contract tests)
+      - False => simulate missing key (AI soft-error coverage test)
     """
 
     # Make behavior deterministic even if developer env sets ENABLE_TRENDS_IN_NARRATIVE=0/1.
     # (Overrides still win for trends=0 / trends=1.)
     monkeypatch.setattr(narrative_route, "_ENV_ENABLE_TRENDS", True, raising=False)
 
+    # Make AI enablement deterministic (Step 2.4: AI allowed gating)
+    monkeypatch.setattr(narrative_route, "_ai_allowed", lambda: ai_allowed, raising=False)
+
     # -----------------------------
     # Stub: narrative generator (AI/template)
     # -----------------------------
     def fake_generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
+        # This stub always returns a valid shape; route-level validation should pass.
         return {
             "macro_summary": ["Stub macro summary."],
-            "micro_summary": {"key_edges": [], "risk_score": 0.1},
+            "micro_summary": {"key_edges": [], "risk_score": 0.1, "risk_rationale": "Stub rationale."},
             "analyst_takeaway": "Stub analyst takeaway.",
+            "confidence_summary": ["Medium"],
             "metadata": {"model": "TEST_MODEL"},
         }
 
@@ -133,7 +143,6 @@ def _install_common_stubs(monkeypatch):
             ),
         ]
 
-        # SimpleNamespace avoids any class-body scoping issues across Python versions.
         return SimpleNamespace(team_trends=[], player_trends=player_trends_list)
 
     monkeypatch.setattr(
@@ -147,20 +156,20 @@ def _install_common_stubs(monkeypatch):
 @pytest.mark.parametrize("mode", ["ai", "template"])
 def test_narrative_markdown_contract(monkeypatch, mode: str):
     """
-    Contract test for /nba/narrative/markdown:
-      - returns ok=true
-      - includes required top-level keys
-      - includes required raw keys (including games_today)
-      - markdown is present and non-empty
+    Contract test for /nba/narrative/markdown (Step 2.4):
+      - ok=true
+      - markdown always present, non-empty
+      - raw.meta always present
+      - raw.meta.soft_errors always present (dict)
     """
-    _install_common_stubs(monkeypatch)
+    _install_common_stubs(monkeypatch, ai_allowed=True)
 
     client = TestClient(app)
     res = client.get(f"/nba/narrative/markdown?mode={mode}&cache_ttl=0")
     assert res.status_code == 200
 
     data = res.json()
-    assert data.get("ok") is True, data  # include payload if it fails
+    assert data.get("ok") is True, data
 
     # Top-level contract
     assert isinstance(data.get("summary"), dict)
@@ -185,6 +194,10 @@ def test_narrative_markdown_contract(monkeypatch, mode: str):
     assert required_raw_keys.issubset(set(raw.keys())), raw.keys()
     assert isinstance(raw.get("meta"), dict)
 
+    # raw.meta contract fields
+    meta = raw["meta"]
+    assert isinstance(meta.get("soft_errors"), dict)
+
     # Odds contract (dict + games list)
     assert isinstance(raw.get("odds"), dict)
     assert isinstance(raw["odds"].get("games", []), list)
@@ -196,10 +209,10 @@ def test_narrative_markdown_contract(monkeypatch, mode: str):
 
 
 @pytest.mark.parametrize(
-    "query, expected_override, expected_enabled, expected_min_player_trends",
+    "query, expected_override, expected_enabled, expected_min_player_trends, expect_trends_soft_error",
     [
-        ("&trends=0", False, False, 0),
-        ("&trends=1", True, True, 1),
+        ("&trends=0", False, False, 0, True),
+        ("&trends=1", True, True, 1, False),
     ],
 )
 def test_trends_override_contract_and_effect(
@@ -208,14 +221,16 @@ def test_trends_override_contract_and_effect(
     expected_override,
     expected_enabled: bool,
     expected_min_player_trends: int,
+    expect_trends_soft_error: bool,
 ):
     """
-    Contract coverage for trends overrides:
-      - raw.meta.trends_override is set when trends query param is provided
-      - raw.meta.trends_enabled_in_narrative follows the override
-      - raw.player_trends length reflects enabled/disabled (0 when off, >0 when on)
+    Step 2.4 + override coverage:
+      - raw.meta.trends_override set when trends query param provided
+      - raw.meta.trends_enabled_in_narrative follows override
+      - raw.player_trends reflects enabled/disabled (0 when off, >0 when on)
+      - raw.meta.soft_errors.trends present only when trends disabled/unavailable
     """
-    _install_common_stubs(monkeypatch)
+    _install_common_stubs(monkeypatch, ai_allowed=True)
 
     client = TestClient(app)
     res = client.get(f"/nba/narrative/markdown?mode=ai&cache_ttl=0{query}")
@@ -230,6 +245,9 @@ def test_trends_override_contract_and_effect(
     meta = raw.get("meta") or {}
     assert isinstance(meta, dict)
 
+    soft_errors = meta.get("soft_errors") or {}
+    assert isinstance(soft_errors, dict)
+
     # Override contract
     assert meta.get("trends_override") == expected_override
 
@@ -242,3 +260,118 @@ def test_trends_override_contract_and_effect(
     assert len(player_trends) >= expected_min_player_trends
     if expected_enabled is False:
         assert len(player_trends) == 0
+
+    # Soft-error for trends only when disabled/unavailable
+    if expect_trends_soft_error:
+        assert isinstance(soft_errors.get("trends"), str)
+        assert soft_errors["trends"].strip() != ""
+    else:
+        assert "trends" not in soft_errors or soft_errors.get("trends") in (None, "")
+
+
+def test_ai_soft_error_when_ai_not_allowed(monkeypatch):
+    """
+    Step 2.4: If mode=ai but AI is not allowed (e.g., missing OPENAI_API_KEY),
+    endpoint should NOT fail hard. It should:
+      - return ok=true
+      - include markdown
+      - populate raw.meta.soft_errors.ai
+      - set summary.metadata.ai_used = False
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=False)
+
+    client = TestClient(app)
+    res = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=0&trends=1")
+    assert res.status_code == 200
+
+    data = res.json()
+    assert data.get("ok") is True, data
+    assert isinstance(data.get("markdown"), str)
+    assert data["markdown"].strip() != ""
+
+    raw = data.get("raw") or {}
+    meta = raw.get("meta") or {}
+    soft_errors = meta.get("soft_errors") or {}
+    assert isinstance(soft_errors, dict)
+
+    # AI soft-error should exist
+    assert isinstance(soft_errors.get("ai"), str)
+    assert soft_errors["ai"].strip() != ""
+
+    # AI usage flag should be false
+    summary_meta = (data.get("summary") or {}).get("metadata") or {}
+    assert isinstance(summary_meta, dict)
+    assert summary_meta.get("ai_used") is False
+
+
+def test_ai_soft_fallback_when_generator_returns_invalid(monkeypatch):
+    """
+    Step 2.4: If AI returns an invalid shape, endpoint still returns:
+      - ok=true
+      - markdown present
+      - raw.meta.soft_errors.ai present
+      - summary.metadata.ai_used=false
+    """
+    _install_common_stubs(monkeypatch)
+
+    # Force AI generator to return invalid type
+    monkeypatch.setattr(
+        narrative_route,
+        "generate_narrative_summary",
+        lambda *args, **kwargs: "NOT_A_DICT",
+        raising=False,
+    )
+
+    client = TestClient(app)
+    res = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=0&trends=1")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert data.get("ok") is True
+    assert isinstance(data.get("markdown"), str)
+    assert data["markdown"].strip() != ""
+
+    raw = data.get("raw") or {}
+    meta = raw.get("meta") or {}
+    soft = meta.get("soft_errors") or {}
+
+    assert isinstance(soft, dict)
+    assert soft.get("ai") is not None
+
+    md = data.get("summary", {}).get("metadata", {})
+    assert md.get("ai_used") is False
+
+
+def test_ai_soft_fallback_when_generator_throws(monkeypatch):
+    """
+    Step 2.4: If AI generation throws, endpoint still returns ok=true and a markdown fallback,
+    and surfaces raw.meta.soft_errors.ai
+    """
+    _install_common_stubs(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("AI exploded")
+
+    monkeypatch.setattr(
+        narrative_route,
+        "generate_narrative_summary",
+        _boom,
+        raising=False,
+    )
+
+    client = TestClient(app)
+    res = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=0&trends=1")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert data.get("ok") is True
+    assert isinstance(data.get("markdown"), str)
+    assert data["markdown"].strip() != ""
+
+    raw = data.get("raw") or {}
+    meta = raw.get("meta") or {}
+    soft = meta.get("soft_errors") or {}
+
+    assert isinstance(soft, dict)
+    assert "ai" in soft
+    assert "AI generation threw" in str(soft["ai"])
