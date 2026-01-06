@@ -1,5 +1,3 @@
-# backend/tests/test_narrative_markdown_contract.py
-
 from __future__ import annotations
 
 import sys
@@ -375,3 +373,42 @@ def test_ai_soft_fallback_when_generator_throws(monkeypatch):
     assert isinstance(soft, dict)
     assert "ai" in soft
     assert "AI generation threw" in str(soft["ai"])
+
+
+def test_cache_partitioned_by_trends_override(monkeypatch):
+    """
+    Step 2.5: Regression coverage.
+    Cache must NOT leak payloads across trends overrides.
+
+    Prior bug:
+      cache_key = (mode, ttl, "today")
+      so trends=0 could poison cache for trends=1 (or vice versa)
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+
+    client = TestClient(app)
+
+    # First call: trends OFF, with cache enabled
+    r0 = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=60&trends=0")
+    assert r0.status_code == 200
+    d0 = r0.json()
+    assert d0.get("ok") is True, d0
+    meta0 = (d0.get("raw") or {}).get("meta") or {}
+    assert meta0.get("trends_enabled_in_narrative") is False
+    assert (d0.get("raw") or {}).get("player_trends") == []
+    # first call should not be cache-used
+    assert meta0.get("cache_used") is False
+
+    # Second call: trends ON, same ttl
+    # If cache is not partitioned, this would incorrectly return trends OFF payload.
+    r1 = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=60&trends=1")
+    assert r1.status_code == 200
+    d1 = r1.json()
+    assert d1.get("ok") is True, d1
+    meta1 = (d1.get("raw") or {}).get("meta") or {}
+    assert meta1.get("trends_enabled_in_narrative") is True
+    pt1 = (d1.get("raw") or {}).get("player_trends") or []
+    assert isinstance(pt1, list)
+    assert len(pt1) >= 1
+    # second call should not be served from the trends=0 cache bucket
+    assert meta1.get("cache_used") is False

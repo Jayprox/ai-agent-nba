@@ -1,55 +1,69 @@
-# tests/test_api_basketball_integration.py
+# backend/tests/test_api_basketball_integration.py
+
+from __future__ import annotations
+
 import os
-import sys
-from pathlib import Path
 
-from dotenv import load_dotenv
-
-# --- Add backend root to Python path ---
-BACKEND_ROOT = Path(__file__).resolve().parent.parent  # /backend
-if str(BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(BACKEND_ROOT))
-
-print(f"📁 Added to sys.path: {BACKEND_ROOT}")
-
-# --- Load environment variables ---
-env_path = BACKEND_ROOT / ".env"
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path)
-    print(f"🔐 .env loaded from: {env_path}")
-else:
-    print(f"⚠️  No .env file found at: {env_path}")
-
-from agents.player_performance_agent.fetch_player_stats_live import fetch_player_stats  # type: ignore[import]
+import pytest
 
 
-def main() -> None:
-    print("🏀 Testing API-Basketball integration (player stats)...\n")
+pytestmark = [pytest.mark.live, pytest.mark.integration]
 
-    # From your /games sample: Miami Heat @ 76ers → Heat = 147, Sixers = 154
-    team_id = 147
+
+def _has_apisports_key() -> bool:
+    """
+    Your API-Basketball client may use different env var names depending on how
+    common/apisports_client.py is implemented. We accept any common variant.
+    """
+    candidates = [
+        "APISPORTS_API_KEY",
+        "APISPORTS_KEY",
+        "API_SPORTS_KEY",
+        "API_BASKETBALL_KEY",
+    ]
+    return any(os.getenv(k, "").strip() for k in candidates)
+
+
+def test_api_basketball_player_stats_smoke():
+    """
+    Live integration smoke test:
+      - requires an APISports/API-Basketball key in env
+      - calls the live player stats fetcher for a known team id
+      - validates the returned shape/types (not the exact numbers)
+    """
+    if not _has_apisports_key():
+        pytest.skip(
+            "API-Basketball/APISports key missing. Set one of: "
+            "APISPORTS_API_KEY, APISPORTS_KEY, API_SPORTS_KEY, API_BASKETBALL_KEY."
+        )
 
     try:
-        data = fetch_player_stats(team_id=team_id)
-
-        print(f"✅ Season: {data.get('season')}")
-        print(f"✅ Raw count: {data.get('raw_count')}")
-        print(f"✅ Normalized player count: {data.get('count')} for team {team_id}")
-
-        players = data.get("players") or []
-        if players:
-            first = players[0]
-            print("\nSample Player:")
-            for k, v in first.items():
-                print(f"  {k}: {v}")
-        else:
-            print("\n⚠️ No players returned. This could mean:")
-            print("   - The season has just started and stats aren't populated yet, or")
-            print("   - The parameters (league/season/team) still need tweaking.")
+        from agents.player_performance_agent.fetch_player_stats_live import (  # type: ignore
+            fetch_player_stats,
+        )
     except Exception as e:
-        print(f"❌ Error: {e}")
-        print(f"   Error type: {type(e).__name__}")
+        pytest.skip(
+            f"Could not import live player stats fetcher: {type(e).__name__}: {e}"
+        )
 
+    # From your earlier notes: Heat team id = 147 (API-Basketball)
+    team_id = 147
 
-if __name__ == "__main__":
-    main()
+    data = fetch_player_stats(team_id=team_id)
+    assert isinstance(data, dict)
+
+    # Shape/type assertions (keep it resilient to season/empty data scenarios)
+    assert "players" in data
+    assert isinstance(data.get("players"), list)
+
+    # Optional-but-useful fields (don’t require values, just types if present)
+    if "count" in data:
+        assert isinstance(data["count"], int)
+        assert data["count"] >= 0
+
+    if "raw_count" in data:
+        assert isinstance(data["raw_count"], int)
+        assert data["raw_count"] >= 0
+
+    if "season" in data:
+        assert isinstance(data["season"], (str, int))

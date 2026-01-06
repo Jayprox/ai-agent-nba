@@ -1,33 +1,37 @@
-# backend/test_openai_connect.py
+# backend/tests/test_openai_connect.py
+
+from __future__ import annotations
+
 import os
-from openai import OpenAI
-from dotenv import load_dotenv
 
-def main():
-    # Explicitly load .env for standalone tests
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.exists(env_path):
-        load_dotenv(env_path)
-        print(f"🔐 .env loaded from: {env_path}")
-    else:
-        print("⚠️  No .env file found next to this script.")
+import pytest
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("❌ OPENAI_API_KEY not found in environment.")
-        print("   Try running: export OPENAI_API_KEY='sk-yourkeyhere'")
-        return
 
-    print(f"✅ OPENAI_API_KEY loaded: {api_key[:10]}... (hidden)")
+pytestmark = [pytest.mark.live, pytest.mark.integration]
+
+
+def _has_openai_key() -> bool:
+    return bool(os.getenv("OPENAI_API_KEY", "").strip())
+
+
+def test_openai_models_list_smoke():
+    """
+    Live integration smoke test:
+      - requires OPENAI_API_KEY
+      - verifies we can reach OpenAI and list models
+    """
+    if not _has_openai_key():
+        pytest.skip("OPENAI_API_KEY missing; set it or run non-live test suite only.")
 
     try:
-        client = OpenAI(api_key=api_key)
-        resp = client.models.list()
-        print(f"✅ Models retrieved: {len(resp.data)}")
-        for m in resp.data[:5]:
-            print("  -", m.id)
+        from openai import OpenAI  # type: ignore
     except Exception as e:
-        print("❌ Error communicating with OpenAI:", e)
+        pytest.skip(f"openai package not available/importable: {type(e).__name__}: {e}")
 
-if __name__ == "__main__":
-    main()
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "").strip())
+
+    # Minimal: just ensure the call works and returns at least 1 model.
+    resp = client.models.list()
+    assert hasattr(resp, "data")
+    assert isinstance(resp.data, list)
+    assert len(resp.data) > 0

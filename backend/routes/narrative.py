@@ -1,5 +1,3 @@
-# backend/routes/narrative.py
-
 from __future__ import annotations
 
 import asyncio
@@ -40,6 +38,10 @@ _ENV_ENABLE_TRENDS = os.getenv("ENABLE_TRENDS_IN_NARRATIVE", "0") == "1"
 # -------------------------
 def _now_utc_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _cap_ttl(ttl: int) -> int:
@@ -91,109 +93,116 @@ def _parse_trends_override(trends: Optional[int]) -> Optional[bool]:
     return bool(int(trends))
 
 
+def _fmt_key(format_value: Optional[str]) -> str:
+    """
+    Normalizes format param into a stable cache key segment.
+    """
+    if format_value is None:
+        return "none"
+    v = str(format_value).strip().lower()
+    return v if v else "none"
+
+
+def _trends_key(override: Optional[bool], effective: bool) -> str:
+    """
+    Stable cache segment for trends behavior.
+    """
+    if override is None:
+        return f"override:none|effective:{int(bool(effective))}"
+    return f"override:{int(bool(override))}|effective:{int(bool(effective))}"
+
+
+def _ai_allowed_key(ai_allowed: bool) -> str:
+    return f"ai_allowed:{int(bool(ai_allowed))}"
+
+
+def _build_cache_key(
+    *,
+    mode: str,
+    ttl: int,
+    scope: str,
+    format_value: Optional[str],
+    trends_override: Optional[bool],
+    effective_trends: bool,
+    ai_allowed: bool,
+) -> Tuple[str, int, str]:
+    """
+    Cache must be partitioned by any query/env that changes payload content.
+    - trends affects player/team trend payload and meta fields
+    - format affects whether /today includes 'markdown'
+    - ai_allowed affects whether mode=ai attempts AI vs fallback
+    """
+    fmt = _fmt_key(format_value)
+    tr = _trends_key(trends_override, effective_trends)
+    ak = _ai_allowed_key(ai_allowed)
+    return (mode, ttl, f"{scope}|fmt={fmt}|{tr}|{ak}")
+
+
 def _ai_allowed() -> bool:
     """
-    Step 2.4 gate: determine if AI is allowed to run.
-    Tests monkeypatch this function for deterministic behavior.
+    Route-level AI gating (Step 2.4).
+    Tests monkeypatch this function to simulate missing key.
     """
-    key = os.getenv("OPENAI_API_KEY", "").strip()
-    return bool(key)
+    if os.getenv("DISABLE_AI", "0") == "1":
+        return False
+    return bool(os.getenv("OPENAI_API_KEY", "").strip())
 
 
-def _fallback_narrative(reason: str) -> Dict[str, Any]:
+def _fallback_summary(reason: str) -> Dict[str, Any]:
     """
-    Step 2.4: Always-available narrative fallback that preserves renderer stability.
+    Route-owned fallback that does NOT depend on services.openai_service
+    (important: tests may monkeypatch generate_narrative_summary to throw).
     """
     return {
-        "macro_summary": (
-            "NBA slate narrative fallback is active. A generated AI narrative is not available for this request. "
-            "Use the slate section above for matchup context."
-        ),
+        "macro_summary": [
+            "NBA narrative is available in fallback mode.",
+            "Detailed AI narrative is currently unavailable for this request.",
+        ],
         "micro_summary": {
             "key_edges": [],
             "risk_score": 0.0,
-            "risk_rationale": "Fallback mode (AI unavailable or invalid output).",
+            "risk_rationale": reason,
         },
-        "analyst_takeaway": (
-            "This is a safe fallback response. If you expect AI output, verify OPENAI_API_KEY is set and restart "
-            "the backend."
-        ),
+        "analyst_takeaway": "Review the slate and odds context; retry AI mode once configuration stabilizes.",
         "confidence_summary": ["Low"],
         "metadata": {
-            "model": "NBA_Fallback_Narrative",
-            "fallback_reason": str(reason or "Unknown"),
+            "model": "ROUTE_FALLBACK",
         },
     }
 
 
-def _normalize_summary(
-    summary_any: Any,
+def _validate_or_fallback(
     *,
-    mode: str,
-) -> Tuple[Dict[str, Any], bool, Optional[str]]:
+    candidate: Any,
+    soft_errors: Dict[str, str],
+    ai_used: bool,
+    reason_prefix: str,
+) -> Tuple[Dict[str, Any], bool]:
     """
-    Step 2.4: Validate + normalize the narrative output into a stable dict shape.
-    Returns: (summary_dict, ai_used, ai_error_or_none)
-
-    ai_used:
-      - True only when mode=ai and the incoming payload is a dict that passes minimal validation.
-      - False otherwise.
+    Ensure we always have a dict summary with required keys for the markdown renderer.
+    Returns: (summary_dict, ai_used_bool)
     """
-    # Template mode: if generator returns a dict, accept it; otherwise fallback.
-    if mode != "ai":
-        if isinstance(summary_any, dict):
-            s = dict(summary_any)
-            s.setdefault("micro_summary", {})
-            if not isinstance(s["micro_summary"], dict):
-                s["micro_summary"] = {}
-            s.setdefault("metadata", {})
-            if not isinstance(s["metadata"], dict):
-                s["metadata"] = {}
-            s.setdefault("macro_summary", "")
-            s.setdefault("analyst_takeaway", "")
-            s.setdefault("confidence_summary", ["Medium"])
-            s["micro_summary"].setdefault("key_edges", [])
-            s["micro_summary"].setdefault("risk_score", 0.0)
-            s["micro_summary"].setdefault("risk_rationale", "Template mode.")
-            return s, False, None
+    if not isinstance(candidate, dict):
+        soft_errors["ai"] = f"{reason_prefix}: AI output invalid type: {type(candidate).__name__}"
+        return _fallback_summary(soft_errors["ai"]), False
 
-        err = f"Template output invalid type: {type(summary_any).__name__}"
-        return _fallback_narrative(err), False, err
+    # Harden minimum structure for renderer stability
+    candidate.setdefault("macro_summary", "")
+    candidate.setdefault("micro_summary", {})
+    if not isinstance(candidate["micro_summary"], dict):
+        candidate["micro_summary"] = {}
 
-    # AI mode: must be a dict, otherwise fallback + error.
-    if not isinstance(summary_any, dict):
-        err = f"AI output invalid type: {type(summary_any).__name__}"
-        return _fallback_narrative(err), False, err
+    candidate.setdefault("analyst_takeaway", "")
+    candidate.setdefault("confidence_summary", ["Medium"])
+    candidate.setdefault("metadata", {})
+    if not isinstance(candidate["metadata"], dict):
+        candidate["metadata"] = {}
 
-    # Minimal hardening of expected shape
-    s = dict(summary_any)
+    candidate["micro_summary"].setdefault("key_edges", [])
+    candidate["micro_summary"].setdefault("risk_score", 0.5)
+    candidate["micro_summary"].setdefault("risk_rationale", "Narrative generated with guardrails.")
 
-    s.setdefault("micro_summary", {})
-    if not isinstance(s["micro_summary"], dict):
-        s["micro_summary"] = {}
-
-    s.setdefault("metadata", {})
-    if not isinstance(s["metadata"], dict):
-        s["metadata"] = {}
-
-    # Required-ish keys for your renderer
-    s.setdefault("macro_summary", "")
-    s.setdefault("analyst_takeaway", "")
-    s.setdefault("confidence_summary", ["Medium"])
-
-    s["micro_summary"].setdefault("key_edges", [])
-    s["micro_summary"].setdefault("risk_score", 0.5)
-    s["micro_summary"].setdefault(
-        "risk_rationale",
-        "Generated under schedule-grounded constraints.",
-    )
-
-    # If macro_summary is a list, keep (renderer supports list), if other type, coerce.
-    macro = s.get("macro_summary")
-    if not isinstance(macro, (str, list)):
-        s["macro_summary"] = str(macro)
-
-    return s, True, None
+    return candidate, ai_used
 
 
 # -------------------------
@@ -297,19 +306,35 @@ async def get_daily_narrative(
 ) -> Dict[str, Any]:
     t0 = time.perf_counter()
     ttl = _cap_ttl(cache_ttl)
-    cache_key = (mode, ttl, "today")
+
+    # --- Determine effective trends setting (needed for cache partition) ---
+    override = _parse_trends_override(trends)
+    effective_trends = _ENV_ENABLE_TRENDS if override is None else override
+
+    # --- Determine AI gating (needed for cache partition) ---
+    ai_allowed = _ai_allowed()
+
+    # --- Cache key MUST include trends + format + ai_allowed ---
+    cache_key = _build_cache_key(
+        mode=mode,
+        ttl=ttl,
+        scope="today",
+        format_value=format,
+        trends_override=override,
+        effective_trends=bool(effective_trends),
+        ai_allowed=bool(ai_allowed),
+    )
 
     cached = _CACHE.get(cache_key)
     if cached and cached["expires_at"] > time.time():
         payload = dict(cached["payload"])
-        payload.setdefault("raw", {}).setdefault("meta", {})
-        payload["raw"]["meta"]["latency_ms"] = 0.0
-        payload["raw"]["meta"]["cache_used"] = True
+        try:
+            payload.setdefault("raw", {}).setdefault("meta", {})
+            payload["raw"]["meta"]["latency_ms"] = 0.0
+            payload["raw"]["meta"]["cache_used"] = True
+        except Exception:
+            pass
         return payload
-
-    # --- Determine effective trends setting ---
-    override = _parse_trends_override(trends)
-    effective_trends = _ENV_ENABLE_TRENDS if override is None else override
 
     # --- Parallel data fetches (games + odds, trends optional) ---
     games_task = _safe_await("games_today", get_today_games())
@@ -333,6 +358,7 @@ async def get_daily_narrative(
     else:
         (games, odds) = await asyncio.gather(games_task, odds_task)
 
+    # --- Soft errors always present ---
     soft_errors: Dict[str, str] = {}
 
     games_today, games_err = games
@@ -348,6 +374,7 @@ async def get_daily_narrative(
     # Explicitly mark player props as backlogged / disabled for now
     soft_errors["player_props"] = "Live player props integration temporarily disabled (backlog)."
 
+    # Trends unpacking
     team_trends, player_trends = [], []
     if trends_data:
         team_trends = getattr(trends_data, "team_trends", []) or []
@@ -363,54 +390,54 @@ async def get_daily_narrative(
     }
 
     # -------------------------
-    # Step 2.4 — Validate + soft-fallback (AI)
+    # Step 2.4 — Validate + soft-fallback (AI gating + try/except)
     # -------------------------
+    requested_mode = (mode or "template").strip().lower()
+    ai_requested = requested_mode == "ai"
     ai_used = False
 
-    # If caller requests AI but AI is not allowed, do not call generator.
-    if mode == "ai" and not _ai_allowed():
-        ai_err = "AI not allowed: OPENAI_API_KEY missing or AI disabled."
-        soft_errors["ai"] = ai_err
-        summary = _fallback_narrative(ai_err)
-        ai_used = False
+    summary_obj: Any = None
 
+    if ai_requested and not ai_allowed:
+        soft_errors["ai"] = "AI mode requested but not allowed (OPENAI_API_KEY missing/disabled)."
+        summary_obj = _fallback_summary(soft_errors["ai"])
+        ai_used = False
     else:
-        # Try generator; catch throws and surface as soft error without failing endpoint
         try:
-            summary_any = generate_narrative_summary(narrative_data, mode=mode)
+            # Call the generator with the requested mode.
+            summary_obj = generate_narrative_summary(narrative_data, mode=requested_mode)
+            ai_used = bool(ai_requested)  # only counts as used if mode=ai AND we got a usable result
         except Exception as e:
-            ai_err = f"AI generation threw: {type(e).__name__}: {e}"
-            soft_errors["ai"] = ai_err
-            summary = _fallback_narrative(ai_err)
+            # Soft-fallback on throw (tests require substring "AI generation threw")
+            if ai_requested:
+                soft_errors["ai"] = f"AI generation threw: {type(e).__name__}: {e}"
+            else:
+                soft_errors["template"] = f"Template generation threw: {type(e).__name__}: {e}"
+            summary_obj = _fallback_summary(soft_errors.get("ai") or soft_errors.get("template") or "Generation failed.")
             ai_used = False
-        else:
-            normalized, maybe_ai_used, normalized_ai_err = _normalize_summary(summary_any, mode=mode)
-            summary = normalized
-            ai_used = bool(maybe_ai_used) if mode == "ai" else False
-            if mode == "ai" and normalized_ai_err:
-                soft_errors["ai"] = normalized_ai_err
-                ai_used = False
 
-    # --- Ensure summary dict exists ---
-    if not isinstance(summary, dict):
-        # Extreme safeguard: should never happen, but keep endpoint alive.
-        hard_err = f"Summary normalization failed: {type(summary).__name__}"
-        soft_errors["ai"] = soft_errors.get("ai") or hard_err
-        summary = _fallback_narrative(soft_errors["ai"])
-        ai_used = False
+    # Validate / harden summary
+    reason_prefix = "AI" if ai_requested else "Template"
+    summary, ai_used = _validate_or_fallback(
+        candidate=summary_obj,
+        soft_errors=soft_errors,
+        ai_used=ai_used,
+        reason_prefix=reason_prefix,
+    )
 
+    # Metadata hardening
     metadata = summary.get("metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
-
     metadata.update(
         {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "model": metadata.get("model", "template" if mode != "ai" else "gpt-4o"),
+            "generated_at": _now_iso(),
+            "model": metadata.get("model", "template" if not ai_requested else "gpt-4o"),
             "prompt_version": _PROMPT_VERSION,
             "inputs_digest": _sha1_digest(narrative_data),
             "games_today_count": len(narrative_data.get("games_today", []) or []),
             "ai_used": bool(ai_used),
+            "ai_allowed": bool(ai_allowed),
         }
     )
     summary["metadata"] = metadata
@@ -431,18 +458,24 @@ async def get_daily_narrative(
                 },
                 "cache_used": False,
                 "cache_ttl_s": ttl,
-                "soft_errors": soft_errors,  # always a dict
-                "mode": mode,
+                "soft_errors": soft_errors,  # ALWAYS present (dict)
+                "mode": requested_mode,
                 "trends_enabled_in_narrative": bool(effective_trends),
                 "trends_override": override,
             },
         },
-        "mode": mode,
+        "mode": requested_mode,
     }
 
+    # /today supports optional markdown embedding
     fmt_str = str(format).lower() if format is not None else ""
     if fmt_str == "markdown":
-        resp["markdown"] = _render_markdown(summary)
+        # Renderer should not throw, but we still guard to keep ok=true
+        try:
+            resp["markdown"] = _render_markdown(summary)
+        except Exception as e:
+            soft_errors["markdown"] = f"Markdown render failed: {type(e).__name__}: {e}"
+            resp["markdown"] = _render_markdown(_fallback_summary(soft_errors["markdown"]))
 
     if ttl > 0:
         _CACHE[cache_key] = {"expires_at": time.time() + ttl, "payload": resp}
@@ -463,100 +496,58 @@ async def get_markdown_narrative(
         description="Override trends in narrative: 1=on, 0=off, omit=use env default",
     ),
 ) -> Dict[str, Any]:
-    """
-    Step 2.4 contract:
-      - Always returns ok=true unless truly impossible
-      - Always includes markdown (fallback if needed)
-      - raw.meta always present, including soft_errors dict
-    """
+    # IMPORTANT:
+    # - /markdown must always return markdown
+    # - /today caching happens inside get_daily_narrative; /markdown adds markdown on top
+    data = await get_daily_narrative(mode=mode, cache_ttl=cache_ttl, trends=trends)
+
+    # --- Guardrails: enforce minimum shape ---
+    if not isinstance(data, dict):
+        data = {"ok": True, "summary": {}, "raw": {"meta": {"soft_errors": {}}}}
+
+    data.setdefault("summary", {})
+    if not isinstance(data["summary"], dict):
+        data["summary"] = {}
+
+    data["summary"].setdefault("metadata", {})
+    if not isinstance(data["summary"]["metadata"], dict):
+        data["summary"]["metadata"] = {}
+
+    data.setdefault("raw", {})
+    if not isinstance(data["raw"], dict):
+        data["raw"] = {}
+
+    data["raw"].setdefault("meta", {})
+    if not isinstance(data["raw"]["meta"], dict):
+        data["raw"]["meta"] = {}
+
+    data["raw"]["meta"].setdefault("soft_errors", {})
+    if not isinstance(data["raw"]["meta"]["soft_errors"], dict):
+        data["raw"]["meta"]["soft_errors"] = {}
+
+    # Ensure raw keys exist (even if empty)
+    data["raw"].setdefault("games_today", [])
+    data["raw"].setdefault("team_trends", [])
+    data["raw"].setdefault("player_trends", [])
+    data["raw"].setdefault("player_props", [])
+    data["raw"].setdefault("odds", {"games": []})
+    data["raw"].setdefault("date_generated", "")
+
+    summary = data.get("summary", {}) or {}
+    if not isinstance(summary, dict):
+        summary = _fallback_summary(f"Summary invalid type: {type(summary).__name__}")
+        data["summary"] = summary
+
+    # Render markdown (never fail hard)
     try:
-        data = await get_daily_narrative(mode=mode, cache_ttl=cache_ttl, trends=trends)
-
-        # --- Guardrails: enforce minimum shape ---
-        if not isinstance(data, dict):
-            data = {"ok": True, "summary": {}, "raw": {"meta": {"soft_errors": {}}}}
-
-        data.setdefault("summary", {})
-        if not isinstance(data["summary"], dict):
-            data["summary"] = {}
-
-        data["summary"].setdefault("metadata", {})
-        if not isinstance(data["summary"]["metadata"], dict):
-            data["summary"]["metadata"] = {}
-
-        data.setdefault("raw", {})
-        if not isinstance(data["raw"], dict):
-            data["raw"] = {}
-
-        data["raw"].setdefault("meta", {})
-        if not isinstance(data["raw"]["meta"], dict):
-            data["raw"]["meta"] = {}
-
-        data["raw"]["meta"].setdefault("soft_errors", {})
-        if not isinstance(data["raw"]["meta"]["soft_errors"], dict):
-            data["raw"]["meta"]["soft_errors"] = {}
-
-        # Ensure raw keys exist (even if empty)
-        data["raw"].setdefault("games_today", [])
-        data["raw"].setdefault("team_trends", [])
-        data["raw"].setdefault("player_trends", [])
-        data["raw"].setdefault("player_props", [])
-        data["raw"].setdefault("odds", {"games": []})
-        data["raw"].setdefault("date_generated", "")
-
-        summary = data.get("summary", {}) or {}
-        if not isinstance(summary, dict):
-            summary = {"summary": str(summary), "metadata": {}}
-
         markdown = _render_markdown(summary, compact=compact)
-
-        data["ok"] = True
-        data["markdown"] = markdown
-        data["summary"]["metadata"]["prompt_version"] = _PROMPT_VERSION
-        return data
-
     except Exception as e:
-        # Truly unexpected failure: still honor contract with a safe fallback.
-        err_text = f"Markdown endpoint failed: {type(e).__name__}: {e}"
-        fallback = _fallback_narrative(err_text)
-        fallback.setdefault("metadata", {})
-        if isinstance(fallback["metadata"], dict):
-            fallback["metadata"].update(
-                {
-                    "generated_at": datetime.now(timezone.utc).isoformat(),
-                    "model": fallback["metadata"].get("model", "NBA_Fallback_Narrative"),
-                    "prompt_version": _PROMPT_VERSION,
-                    "ai_used": False,
-                }
-            )
+        se = data["raw"]["meta"].setdefault("soft_errors", {})
+        se["markdown"] = f"Markdown generation failed: {type(e).__name__}: {e}"
+        markdown = _render_markdown(_fallback_summary(se["markdown"]), compact=compact)
 
-        return {
-            "ok": True,
-            "summary": fallback,
-            "raw": {
-                "date_generated": _now_utc_str(),
-                "games_today": [],
-                "team_trends": [],
-                "player_trends": [],
-                "player_props": [],
-                "odds": {"games": []},
-                "meta": {
-                    "latency_ms": 0.0,
-                    "source_counts": {
-                        "games_today": 0,
-                        "player_trends": 0,
-                        "team_trends": 0,
-                        "player_props": 0,
-                        "odds_games": 0,
-                    },
-                    "cache_used": False,
-                    "cache_ttl_s": 0,
-                    "soft_errors": {"ai": err_text},
-                    "mode": mode,
-                    "trends_enabled_in_narrative": False,
-                    "trends_override": None,
-                },
-            },
-            "mode": mode,
-            "markdown": _render_markdown(fallback, compact=compact),
-        }
+    data["markdown"] = markdown
+    data["summary"]["metadata"]["prompt_version"] = _PROMPT_VERSION
+    data["ok"] = True  # /markdown should never flip ok=false for soft failures
+
+    return data
