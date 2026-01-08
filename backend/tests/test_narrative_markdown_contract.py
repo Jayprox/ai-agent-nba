@@ -1,3 +1,5 @@
+# backend/tests/test_narrative_markdown_contract.py
+
 from __future__ import annotations
 
 import sys
@@ -412,3 +414,140 @@ def test_cache_partitioned_by_trends_override(monkeypatch):
     assert len(pt1) >= 1
     # second call should not be served from the trends=0 cache bucket
     assert meta1.get("cache_used") is False
+
+
+def test_cache_observability_fields_present(monkeypatch):
+    """
+    Step 2.6: Cache observability contract.
+    raw.meta must always contain:
+      - cache_used (bool)
+      - cache_ttl_s (int)
+      - cache_key (str)
+      - cache_expires_in_s (float/int)
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+    
+    # Clear cache to ensure clean state
+    narrative_route._CACHE.clear()
+    narrative_route._INFLIGHT_LOCKS.clear()
+
+    client = TestClient(app)
+
+    # First call: no cache
+    res = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=60&trends=1")
+    assert res.status_code == 200
+    data = res.json()
+    assert data.get("ok") is True
+
+    meta = (data.get("raw") or {}).get("meta") or {}
+    assert isinstance(meta, dict)
+
+    # Step 2.6 observability fields
+    assert isinstance(meta.get("cache_used"), bool)
+    assert meta["cache_used"] is False  # First call
+
+    assert isinstance(meta.get("cache_ttl_s"), int)
+    assert meta["cache_ttl_s"] == 60
+
+    assert isinstance(meta.get("cache_key"), str)
+    assert meta["cache_key"].strip() != ""
+
+    assert isinstance(meta.get("cache_expires_in_s"), (int, float))
+    assert meta["cache_expires_in_s"] > 0
+
+
+def test_cache_hit_returns_cache_meta(monkeypatch):
+    """
+    Step 2.6: On cache hit, raw.meta should reflect:
+      - cache_used=true
+      - cache_expires_in_s should decrease on subsequent hits
+      - cache_key should match
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+    
+    # Clear cache to ensure clean state
+    narrative_route._CACHE.clear()
+    narrative_route._INFLIGHT_LOCKS.clear()
+
+    client = TestClient(app)
+
+    # First call: populate cache
+    r1 = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=60&trends=1")
+    assert r1.status_code == 200
+    d1 = r1.json()
+    meta1 = (d1.get("raw") or {}).get("meta") or {}
+    assert meta1.get("cache_used") is False
+    key1 = meta1.get("cache_key")
+    assert isinstance(key1, str)
+
+    # Second call: should hit cache
+    r2 = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=60&trends=1")
+    assert r2.status_code == 200
+    d2 = r2.json()
+    meta2 = (d2.get("raw") or {}).get("meta") or {}
+    assert meta2.get("cache_used") is True
+    assert meta2.get("cache_key") == key1
+    assert isinstance(meta2.get("cache_expires_in_s"), (int, float))
+    assert 0 < meta2["cache_expires_in_s"] <= 60
+
+
+def test_cache_partitioned_by_mode(monkeypatch):
+    """
+    
+    # Clear cache to ensure clean state
+    narrative_route._CACHE.clear()
+    narrative_route._INFLIGHT_LOCKS.clear()
+    Step 2.6: Cache should partition by mode.
+    mode=ai and mode=template should have different cache keys.
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+
+    client = TestClient(app)
+
+    # mode=ai
+    r1 = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=60&trends=1")
+    assert r1.status_code == 200
+    d1 = r1.json()
+    meta1 = (d1.get("raw") or {}).get("meta") or {}
+    key1 = meta1.get("cache_key")
+
+    # mode=template
+    r2 = client.get("/nba/narrative/markdown?mode=template&cache_ttl=60&trends=1")
+    assert r2.status_code == 200
+    d2 = r2.json()
+    meta2 = (d2.get("raw") or {}).get("meta") or {}
+    key2 = meta2.get("cache_key")
+
+    # Keys should differ
+    assert key1 != key2
+    
+    # Clear cache to ensure clean state
+    narrative_route._CACHE.clear()
+    narrative_route._INFLIGHT_LOCKS.clear()
+
+
+def test_cache_partitioned_by_compact_flag(monkeypatch):
+    """
+    Step 2.6: Cache should partition by compact flag.
+    /markdown?compact=true and /markdown?compact=false should have different keys.
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+
+    client = TestClient(app)
+
+    # compact=false (default)
+    r1 = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=60&trends=1&compact=false")
+    assert r1.status_code == 200
+    d1 = r1.json()
+    meta1 = (d1.get("raw") or {}).get("meta") or {}
+    key1 = meta1.get("cache_key")
+
+    # compact=true
+    r2 = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=60&trends=1&compact=true")
+    assert r2.status_code == 200
+    d2 = r2.json()
+    meta2 = (d2.get("raw") or {}).get("meta") or {}
+    key2 = meta2.get("cache_key")
+
+    # Keys should differ
+    assert key1 != key2

@@ -1,3 +1,5 @@
+# backend/routes/narrative.py
+
 from __future__ import annotations
 
 import asyncio
@@ -27,9 +29,10 @@ router = APIRouter(prefix="/nba/narrative", tags=["Narrative"])
 # -------------------------
 # Config / Cache
 # -------------------------
-_CACHE: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
+_CACHE: Dict[str, Dict[str, Any]] = {}
+_INFLIGHT_LOCKS: Dict[str, asyncio.Lock] = {}
 _MAX_CACHE_TTL = 120
-_PROMPT_VERSION = "v3.7-slate-grounded-trends-toggle"
+_PROMPT_VERSION = "v3.8-cache-observability"
 _ENV_ENABLE_TRENDS = os.getenv("ENABLE_TRENDS_IN_NARRATIVE", "0") == "1"
 
 
@@ -103,19 +106,6 @@ def _fmt_key(format_value: Optional[str]) -> str:
     return v if v else "none"
 
 
-def _trends_key(override: Optional[bool], effective: bool) -> str:
-    """
-    Stable cache segment for trends behavior.
-    """
-    if override is None:
-        return f"override:none|effective:{int(bool(effective))}"
-    return f"override:{int(bool(override))}|effective:{int(bool(effective))}"
-
-
-def _ai_allowed_key(ai_allowed: bool) -> str:
-    return f"ai_allowed:{int(bool(ai_allowed))}"
-
-
 def _build_cache_key(
     *,
     mode: str,
@@ -125,17 +115,32 @@ def _build_cache_key(
     trends_override: Optional[bool],
     effective_trends: bool,
     ai_allowed: bool,
-) -> Tuple[str, int, str]:
+    compact: bool = False,
+) -> str:
     """
-    Cache must be partitioned by any query/env that changes payload content.
-    - trends affects player/team trend payload and meta fields
-    - format affects whether /today includes 'markdown'
-    - ai_allowed affects whether mode=ai attempts AI vs fallback
+    Step 2.6 — Cache key correctness.
+    Cache must be partitioned by all inputs that affect output:
+      - mode (ai/template)
+      - trends (effective + override)
+      - format
+      - ai_allowed
+      - compact (for /markdown)
+      - ttl (cache lifetime)
+      - scope (today/markdown)
     """
     fmt = _fmt_key(format_value)
-    tr = _trends_key(trends_override, effective_trends)
-    ak = _ai_allowed_key(ai_allowed)
-    return (mode, ttl, f"{scope}|fmt={fmt}|{tr}|{ak}")
+    
+    # Normalize trends segment
+    if trends_override is None:
+        tr = f"tr:env={int(bool(effective_trends))}"
+    else:
+        tr = f"tr:ovr={int(bool(trends_override))}|eff={int(bool(effective_trends))}"
+    
+    ak = f"ai={int(bool(ai_allowed))}"
+    cmp = f"cmp={int(bool(compact))}"
+    
+    # Deterministic string key
+    return f"m={mode}|ttl={ttl}|sc={scope}|fmt={fmt}|{tr}|{ak}|{cmp}"
 
 
 def _ai_allowed() -> bool:
@@ -314,7 +319,7 @@ async def get_daily_narrative(
     # --- Determine AI gating (needed for cache partition) ---
     ai_allowed = _ai_allowed()
 
-    # --- Cache key MUST include trends + format + ai_allowed ---
+    # --- Step 2.6: Cache key MUST include trends + format + ai_allowed ---
     cache_key = _build_cache_key(
         mode=mode,
         ttl=ttl,
@@ -323,164 +328,195 @@ async def get_daily_narrative(
         trends_override=override,
         effective_trends=bool(effective_trends),
         ai_allowed=bool(ai_allowed),
+        compact=False,
     )
 
+    # --- Step 2.6: Check cache before acquiring lock ---
     cached = _CACHE.get(cache_key)
     if cached and cached["expires_at"] > time.time():
         payload = dict(cached["payload"])
         try:
             payload.setdefault("raw", {}).setdefault("meta", {})
-            payload["raw"]["meta"]["latency_ms"] = 0.0
-            payload["raw"]["meta"]["cache_used"] = True
+            meta = payload["raw"]["meta"]
+            meta["latency_ms"] = 0.0
+            meta["cache_used"] = True
+            meta["cache_key"] = cache_key
+            meta["cache_ttl_s"] = ttl
+            meta["cache_expires_in_s"] = round(cached["expires_at"] - time.time(), 2)
         except Exception:
             pass
         return payload
 
-    # --- Parallel data fetches (games + odds, trends optional) ---
-    games_task = _safe_await("games_today", get_today_games())
-    odds_task = _safe_call("odds", fetch_moneyline_odds)
+    # --- Step 2.6: Stampede protection via inflight lock ---
+    if cache_key not in _INFLIGHT_LOCKS:
+        _INFLIGHT_LOCKS[cache_key] = asyncio.Lock()
+    
+    lock = _INFLIGHT_LOCKS[cache_key]
+    
+    async with lock:
+        # Double-check cache after acquiring lock (another request may have populated it)
+        cached = _CACHE.get(cache_key)
+        if cached and cached["expires_at"] > time.time():
+            payload = dict(cached["payload"])
+            try:
+                payload.setdefault("raw", {}).setdefault("meta", {})
+                meta = payload["raw"]["meta"]
+                meta["latency_ms"] = 0.0
+                meta["cache_used"] = True
+                meta["cache_key"] = cache_key
+                meta["cache_ttl_s"] = ttl
+                meta["cache_expires_in_s"] = round(cached["expires_at"] - time.time(), 2)
+            except Exception:
+                pass
+            return payload
 
-    trends_task = None
-    trends_err: Optional[str] = None
-    trends_data = None
+        # --- Parallel data fetches (games + odds, trends optional) ---
+        games_task = _safe_await("games_today", get_today_games())
+        odds_task = _safe_call("odds", fetch_moneyline_odds)
 
-    if effective_trends:
-        if get_trends_summary is None:
-            trends_err = "Trends agent unavailable (import failed)."
-        else:
-            trends_task = _safe_call("trends", get_trends_summary)
-    else:
-        trends_err = "Disabled (trends=0 override or ENABLE_TRENDS_IN_NARRATIVE=0)."
+        trends_task = None
+        trends_err: Optional[str] = None
+        trends_data = None
 
-    if trends_task is not None:
-        (games, odds, trends_res) = await asyncio.gather(games_task, odds_task, trends_task)
-        trends_data, trends_err = trends_res
-    else:
-        (games, odds) = await asyncio.gather(games_task, odds_task)
-
-    # --- Soft errors always present ---
-    soft_errors: Dict[str, str] = {}
-
-    games_today, games_err = games
-    odds_data, odds_err = odds
-
-    if games_err:
-        soft_errors["games_today"] = games_err
-    if odds_err:
-        soft_errors["odds"] = odds_err
-    if trends_err:
-        soft_errors["trends"] = trends_err
-
-    # Explicitly mark player props as backlogged / disabled for now
-    soft_errors["player_props"] = "Live player props integration temporarily disabled (backlog)."
-
-    # Trends unpacking
-    team_trends, player_trends = [], []
-    if trends_data:
-        team_trends = getattr(trends_data, "team_trends", []) or []
-        player_trends = getattr(trends_data, "player_trends", []) or []
-
-    narrative_data = {
-        "date_generated": _now_utc_str(),
-        "games_today": games_today or [],
-        "player_trends": [p.model_dump() for p in player_trends] if player_trends else [],
-        "team_trends": [t.model_dump() for t in team_trends] if team_trends else [],
-        "player_props": [],
-        "odds": odds_data.model_dump() if isinstance(odds_data, OddsResponse) else odds_data,
-    }
-
-    # -------------------------
-    # Step 2.4 — Validate + soft-fallback (AI gating + try/except)
-    # -------------------------
-    requested_mode = (mode or "template").strip().lower()
-    ai_requested = requested_mode == "ai"
-    ai_used = False
-
-    summary_obj: Any = None
-
-    if ai_requested and not ai_allowed:
-        soft_errors["ai"] = "AI mode requested but not allowed (OPENAI_API_KEY missing/disabled)."
-        summary_obj = _fallback_summary(soft_errors["ai"])
-        ai_used = False
-    else:
-        try:
-            # Call the generator with the requested mode.
-            summary_obj = generate_narrative_summary(narrative_data, mode=requested_mode)
-            ai_used = bool(ai_requested)  # only counts as used if mode=ai AND we got a usable result
-        except Exception as e:
-            # Soft-fallback on throw (tests require substring "AI generation threw")
-            if ai_requested:
-                soft_errors["ai"] = f"AI generation threw: {type(e).__name__}: {e}"
+        if effective_trends:
+            if get_trends_summary is None:
+                trends_err = "Trends agent unavailable (import failed)."
             else:
-                soft_errors["template"] = f"Template generation threw: {type(e).__name__}: {e}"
-            summary_obj = _fallback_summary(soft_errors.get("ai") or soft_errors.get("template") or "Generation failed.")
-            ai_used = False
+                trends_task = _safe_call("trends", get_trends_summary)
+        else:
+            trends_err = "Disabled (trends=0 override or ENABLE_TRENDS_IN_NARRATIVE=0)."
 
-    # Validate / harden summary
-    reason_prefix = "AI" if ai_requested else "Template"
-    summary, ai_used = _validate_or_fallback(
-        candidate=summary_obj,
-        soft_errors=soft_errors,
-        ai_used=ai_used,
-        reason_prefix=reason_prefix,
-    )
+        if trends_task is not None:
+            (games, odds, trends_res) = await asyncio.gather(games_task, odds_task, trends_task)
+            trends_data, trends_err = trends_res
+        else:
+            (games, odds) = await asyncio.gather(games_task, odds_task)
 
-    # Metadata hardening
-    metadata = summary.get("metadata", {})
-    if not isinstance(metadata, dict):
-        metadata = {}
-    metadata.update(
-        {
-            "generated_at": _now_iso(),
-            "model": metadata.get("model", "template" if not ai_requested else "gpt-4o"),
-            "prompt_version": _PROMPT_VERSION,
-            "inputs_digest": _sha1_digest(narrative_data),
-            "games_today_count": len(narrative_data.get("games_today", []) or []),
-            "ai_used": bool(ai_used),
-            "ai_allowed": bool(ai_allowed),
+        # --- Soft errors always present ---
+        soft_errors: Dict[str, str] = {}
+
+        games_today, games_err = games
+        odds_data, odds_err = odds
+
+        if games_err:
+            soft_errors["games_today"] = games_err
+        if odds_err:
+            soft_errors["odds"] = odds_err
+        if trends_err:
+            soft_errors["trends"] = trends_err
+
+        # Explicitly mark player props as backlogged / disabled for now
+        soft_errors["player_props"] = "Live player props integration temporarily disabled (backlog)."
+
+        # Trends unpacking
+        team_trends, player_trends = [], []
+        if trends_data:
+            team_trends = getattr(trends_data, "team_trends", []) or []
+            player_trends = getattr(trends_data, "player_trends", []) or []
+
+        narrative_data = {
+            "date_generated": _now_utc_str(),
+            "games_today": games_today or [],
+            "player_trends": [p.model_dump() for p in player_trends] if player_trends else [],
+            "team_trends": [t.model_dump() for t in team_trends] if team_trends else [],
+            "player_props": [],
+            "odds": odds_data.model_dump() if isinstance(odds_data, OddsResponse) else odds_data,
         }
-    )
-    summary["metadata"] = metadata
 
-    resp: Dict[str, Any] = {
-        "ok": True,
-        "summary": summary,
-        "raw": {
-            **narrative_data,
-            "meta": {
-                "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
-                "source_counts": {
-                    "games_today": len(narrative_data.get("games_today", []) or []),
-                    "player_trends": len(narrative_data.get("player_trends", [])),
-                    "team_trends": len(narrative_data.get("team_trends", [])),
-                    "player_props": len(narrative_data.get("player_props", [])),
-                    "odds_games": len((narrative_data.get("odds") or {}).get("games", []) or []),
+        # -------------------------
+        # Step 2.4 — Validate + soft-fallback (AI gating + try/except)
+        # -------------------------
+        requested_mode = (mode or "template").strip().lower()
+        ai_requested = requested_mode == "ai"
+        ai_used = False
+
+        summary_obj: Any = None
+
+        if ai_requested and not ai_allowed:
+            soft_errors["ai"] = "AI mode requested but not allowed (OPENAI_API_KEY missing/disabled)."
+            summary_obj = _fallback_summary(soft_errors["ai"])
+            ai_used = False
+        else:
+            try:
+                # Call the generator with the requested mode.
+                summary_obj = generate_narrative_summary(narrative_data, mode=requested_mode)
+                ai_used = bool(ai_requested)  # only counts as used if mode=ai AND we got a usable result
+            except Exception as e:
+                # Soft-fallback on throw (tests require substring "AI generation threw")
+                if ai_requested:
+                    soft_errors["ai"] = f"AI generation threw: {type(e).__name__}: {e}"
+                else:
+                    soft_errors["template"] = f"Template generation threw: {type(e).__name__}: {e}"
+                summary_obj = _fallback_summary(soft_errors.get("ai") or soft_errors.get("template") or "Generation failed.")
+                ai_used = False
+
+        # Validate / harden summary
+        reason_prefix = "AI" if ai_requested else "Template"
+        summary, ai_used = _validate_or_fallback(
+            candidate=summary_obj,
+            soft_errors=soft_errors,
+            ai_used=ai_used,
+            reason_prefix=reason_prefix,
+        )
+
+        # Metadata hardening
+        metadata = summary.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.update(
+            {
+                "generated_at": _now_iso(),
+                "model": metadata.get("model", "template" if not ai_requested else "gpt-4o"),
+                "prompt_version": _PROMPT_VERSION,
+                "inputs_digest": _sha1_digest(narrative_data),
+                "games_today_count": len(narrative_data.get("games_today", []) or []),
+                "ai_used": bool(ai_used),
+                "ai_allowed": bool(ai_allowed),
+            }
+        )
+        summary["metadata"] = metadata
+
+        resp: Dict[str, Any] = {
+            "ok": True,
+            "summary": summary,
+            "raw": {
+                **narrative_data,
+                "meta": {
+                    "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
+                    "source_counts": {
+                        "games_today": len(narrative_data.get("games_today", []) or []),
+                        "player_trends": len(narrative_data.get("player_trends", [])),
+                        "team_trends": len(narrative_data.get("team_trends", [])),
+                        "player_props": len(narrative_data.get("player_props", [])),
+                        "odds_games": len((narrative_data.get("odds") or {}).get("games", []) or []),
+                    },
+                    "cache_used": False,
+                    "cache_ttl_s": ttl,
+                    "cache_key": cache_key,
+                    "cache_expires_in_s": ttl,  # Fresh generation
+                    "soft_errors": soft_errors,  # ALWAYS present (dict)
+                    "mode": requested_mode,
+                    "trends_enabled_in_narrative": bool(effective_trends),
+                    "trends_override": override,
                 },
-                "cache_used": False,
-                "cache_ttl_s": ttl,
-                "soft_errors": soft_errors,  # ALWAYS present (dict)
-                "mode": requested_mode,
-                "trends_enabled_in_narrative": bool(effective_trends),
-                "trends_override": override,
             },
-        },
-        "mode": requested_mode,
-    }
+            "mode": requested_mode,
+        }
 
-    # /today supports optional markdown embedding
-    fmt_str = str(format).lower() if format is not None else ""
-    if fmt_str == "markdown":
-        # Renderer should not throw, but we still guard to keep ok=true
-        try:
-            resp["markdown"] = _render_markdown(summary)
-        except Exception as e:
-            soft_errors["markdown"] = f"Markdown render failed: {type(e).__name__}: {e}"
-            resp["markdown"] = _render_markdown(_fallback_summary(soft_errors["markdown"]))
+        # /today supports optional markdown embedding
+        fmt_str = str(format).lower() if format is not None else ""
+        if fmt_str == "markdown":
+            # Renderer should not throw, but we still guard to keep ok=true
+            try:
+                resp["markdown"] = _render_markdown(summary)
+            except Exception as e:
+                soft_errors["markdown"] = f"Markdown render failed: {type(e).__name__}: {e}"
+                resp["markdown"] = _render_markdown(_fallback_summary(soft_errors["markdown"]))
 
-    if ttl > 0:
-        _CACHE[cache_key] = {"expires_at": time.time() + ttl, "payload": resp}
+        if ttl > 0:
+            _CACHE[cache_key] = {"expires_at": time.time() + ttl, "payload": resp}
 
-    return resp
+        return resp
 
 
 # -------------------------
@@ -496,58 +532,122 @@ async def get_markdown_narrative(
         description="Override trends in narrative: 1=on, 0=off, omit=use env default",
     ),
 ) -> Dict[str, Any]:
-    # IMPORTANT:
-    # - /markdown must always return markdown
-    # - /today caching happens inside get_daily_narrative; /markdown adds markdown on top
-    data = await get_daily_narrative(mode=mode, cache_ttl=cache_ttl, trends=trends)
+    # Step 2.6: /markdown has its own cache key (includes compact flag)
+    override = _parse_trends_override(trends)
+    effective_trends = _ENV_ENABLE_TRENDS if override is None else override
+    ai_allowed = _ai_allowed()
+    ttl = _cap_ttl(cache_ttl)
+    
+    cache_key = _build_cache_key(
+        mode=mode,
+        ttl=ttl,
+        scope="markdown",
+        format_value=None,
+        trends_override=override,
+        effective_trends=bool(effective_trends),
+        ai_allowed=bool(ai_allowed),
+        compact=compact,
+    )
+    
+    # Check cache before lock
+    cached = _CACHE.get(cache_key)
+    if cached and cached["expires_at"] > time.time():
+        payload = dict(cached["payload"])
+        try:
+            payload.setdefault("raw", {}).setdefault("meta", {})
+            meta = payload["raw"]["meta"]
+            meta["latency_ms"] = 0.0
+            meta["cache_used"] = True
+            meta["cache_key"] = cache_key
+            meta["cache_ttl_s"] = ttl
+            meta["cache_expires_in_s"] = round(cached["expires_at"] - time.time(), 2)
+        except Exception:
+            pass
+        return payload
+    
+    # Stampede protection
+    if cache_key not in _INFLIGHT_LOCKS:
+        _INFLIGHT_LOCKS[cache_key] = asyncio.Lock()
+    
+    lock = _INFLIGHT_LOCKS[cache_key]
+    
+    async with lock:
+        # Double-check cache
+        cached = _CACHE.get(cache_key)
+        if cached and cached["expires_at"] > time.time():
+            payload = dict(cached["payload"])
+            try:
+                payload.setdefault("raw", {}).setdefault("meta", {})
+                meta = payload["raw"]["meta"]
+                meta["latency_ms"] = 0.0
+                meta["cache_used"] = True
+                meta["cache_key"] = cache_key
+                meta["cache_ttl_s"] = ttl
+                meta["cache_expires_in_s"] = round(cached["expires_at"] - time.time(), 2)
+            except Exception:
+                pass
+            return payload
 
-    # --- Guardrails: enforce minimum shape ---
-    if not isinstance(data, dict):
-        data = {"ok": True, "summary": {}, "raw": {"meta": {"soft_errors": {}}}}
+        # Call /today with format=markdown
+        data = await get_daily_narrative(mode=mode, cache_ttl=0, trends=trends, format="markdown")
 
-    data.setdefault("summary", {})
-    if not isinstance(data["summary"], dict):
-        data["summary"] = {}
+        # --- Guardrails: enforce minimum shape ---
+        if not isinstance(data, dict):
+            data = {"ok": True, "summary": {}, "raw": {"meta": {"soft_errors": {}}}}
 
-    data["summary"].setdefault("metadata", {})
-    if not isinstance(data["summary"]["metadata"], dict):
-        data["summary"]["metadata"] = {}
+        data.setdefault("summary", {})
+        if not isinstance(data["summary"], dict):
+            data["summary"] = {}
 
-    data.setdefault("raw", {})
-    if not isinstance(data["raw"], dict):
-        data["raw"] = {}
+        data["summary"].setdefault("metadata", {})
+        if not isinstance(data["summary"]["metadata"], dict):
+            data["summary"]["metadata"] = {}
 
-    data["raw"].setdefault("meta", {})
-    if not isinstance(data["raw"]["meta"], dict):
-        data["raw"]["meta"] = {}
+        data.setdefault("raw", {})
+        if not isinstance(data["raw"], dict):
+            data["raw"] = {}
 
-    data["raw"]["meta"].setdefault("soft_errors", {})
-    if not isinstance(data["raw"]["meta"]["soft_errors"], dict):
-        data["raw"]["meta"]["soft_errors"] = {}
+        data["raw"].setdefault("meta", {})
+        if not isinstance(data["raw"]["meta"], dict):
+            data["raw"]["meta"] = {}
 
-    # Ensure raw keys exist (even if empty)
-    data["raw"].setdefault("games_today", [])
-    data["raw"].setdefault("team_trends", [])
-    data["raw"].setdefault("player_trends", [])
-    data["raw"].setdefault("player_props", [])
-    data["raw"].setdefault("odds", {"games": []})
-    data["raw"].setdefault("date_generated", "")
+        data["raw"]["meta"].setdefault("soft_errors", {})
+        if not isinstance(data["raw"]["meta"]["soft_errors"], dict):
+            data["raw"]["meta"]["soft_errors"] = {}
 
-    summary = data.get("summary", {}) or {}
-    if not isinstance(summary, dict):
-        summary = _fallback_summary(f"Summary invalid type: {type(summary).__name__}")
-        data["summary"] = summary
+        # Ensure raw keys exist (even if empty)
+        data["raw"].setdefault("games_today", [])
+        data["raw"].setdefault("team_trends", [])
+        data["raw"].setdefault("player_trends", [])
+        data["raw"].setdefault("player_props", [])
+        data["raw"].setdefault("odds", {"games": []})
+        data["raw"].setdefault("date_generated", "")
 
-    # Render markdown (never fail hard)
-    try:
-        markdown = _render_markdown(summary, compact=compact)
-    except Exception as e:
-        se = data["raw"]["meta"].setdefault("soft_errors", {})
-        se["markdown"] = f"Markdown generation failed: {type(e).__name__}: {e}"
-        markdown = _render_markdown(_fallback_summary(se["markdown"]), compact=compact)
+        summary = data.get("summary", {}) or {}
+        if not isinstance(summary, dict):
+            summary = _fallback_summary(f"Summary invalid type: {type(summary).__name__}")
+            data["summary"] = summary
 
-    data["markdown"] = markdown
-    data["summary"]["metadata"]["prompt_version"] = _PROMPT_VERSION
-    data["ok"] = True  # /markdown should never flip ok=false for soft failures
+        # Render markdown (never fail hard)
+        try:
+            markdown = _render_markdown(summary, compact=compact)
+        except Exception as e:
+            se = data["raw"]["meta"].setdefault("soft_errors", {})
+            se["markdown"] = f"Markdown generation failed: {type(e).__name__}: {e}"
+            markdown = _render_markdown(_fallback_summary(se["markdown"]), compact=compact)
 
-    return data
+        data["markdown"] = markdown
+        data["summary"]["metadata"]["prompt_version"] = _PROMPT_VERSION
+        data["ok"] = True  # /markdown should never flip ok=false for soft failures
+        
+        # Step 2.6: Update cache meta for /markdown endpoint
+        meta = data["raw"]["meta"]
+        meta["cache_key"] = cache_key
+        meta["cache_ttl_s"] = ttl
+        meta["cache_expires_in_s"] = ttl
+        
+        # Cache this markdown response
+        if ttl > 0:
+            _CACHE[cache_key] = {"expires_at": time.time() + ttl, "payload": data}
+
+        return data
