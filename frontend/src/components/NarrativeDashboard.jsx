@@ -396,11 +396,12 @@ const NarrativeDashboard = () => {
       // compact toggle
       if (compactOverride) params.set("compact", "true");
 
-      // cache ttl: if forceRefresh, bust cache (0). Otherwise use selected TTL when > 0.
-      if (forceRefresh) {
+      // cache ttl: use ttlOverride if provided, otherwise use state, default to 0
+      const effectiveTtl = typeof ttlOverride === "number" ? ttlOverride : cacheTtl;
+      if (effectiveTtl > 0) {
+        params.set("cache_ttl", String(effectiveTtl));
+      } else {
         params.set("cache_ttl", "0");
-      } else if (typeof ttlOverride === "number" && ttlOverride > 0) {
-        params.set("cache_ttl", String(ttlOverride));
       }
 
       // Only include trends param if override is not null
@@ -572,6 +573,13 @@ const NarrativeDashboard = () => {
   const scGames = sourceCounts?.games_today;
   const scPlayerTrends = sourceCounts?.player_trends;
   const scTeamTrends = sourceCounts?.team_trends;
+
+  // Phase 4: Enhanced observability
+  const softErrors = displayRawMeta?.soft_errors || {};
+  const contractVersion = displayRawMeta?.contract_version || "—";
+  const requestId = displayRawMeta?.request_id || "—";
+  const cacheExpiresInS = displayRawMeta?.cache_expires_in_s;
+  const cacheKey = displayRawMeta?.cache_key || "—";
 
   if (loading) {
     return (
@@ -1021,21 +1029,119 @@ const NarrativeDashboard = () => {
           </div>
         </div>
 
-        {trendsSoftError ? (
+        {/* Phase 4: Enhanced Soft Errors Display */}
+        {Object.keys(softErrors).length > 0 && (
           <div
             style={{
               marginTop: 12,
               fontSize: 12,
               color: "#cbd5e1",
-              border: "1px dashed #334155",
+              border: "1px dashed #fbbf24",
               borderRadius: 12,
               padding: 12,
-              background: "rgba(0,0,0,0.12)",
+              background: "rgba(251, 191, 36, 0.08)",
             }}
           >
-            <span style={{ fontWeight: 900 }}>soft_errors.trends:</span> {String(trendsSoftError)}
+            <div style={{ fontWeight: 900, color: "#fbbf24", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+              ⚠️ Soft Errors Detected
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {softErrors.ai && (
+                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>🤖 AI:</span>
+                  <span>{String(softErrors.ai)}</span>
+                </div>
+              )}
+              {softErrors.trends && (
+                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>📈 Trends:</span>
+                  <span>{String(softErrors.trends)}</span>
+                </div>
+              )}
+              {softErrors.odds && (
+                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>🎲 Odds:</span>
+                  <span>{String(softErrors.odds)}</span>
+                </div>
+              )}
+              {softErrors.games_today && (
+                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>🏀 Games:</span>
+                  <span>{String(softErrors.games_today)}</span>
+                </div>
+              )}
+              {softErrors.player_props && (
+                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>👤 Player Props:</span>
+                  <span>{String(softErrors.player_props)}</span>
+                </div>
+              )}
+              {softErrors.markdown && (
+                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>📝 Markdown:</span>
+                  <span>{String(softErrors.markdown)}</span>
+                </div>
+              )}
+              {softErrors.template && (
+                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>📄 Template:</span>
+                  <span>{String(softErrors.template)}</span>
+                </div>
+              )}
+            </div>
           </div>
-        ) : null}
+        )}
+
+        {/* Phase 4: Cache Status Indicator */}
+        {cacheUsed !== undefined && (
+          <div
+            style={{
+              marginTop: 12,
+              fontSize: 12,
+              color: "#cbd5e1",
+              border: cacheUsed ? "1px solid #10b981" : "1px dashed #64748b",
+              borderRadius: 12,
+              padding: 12,
+              background: cacheUsed ? "rgba(16, 185, 129, 0.08)" : "rgba(0,0,0,0.12)",
+            }}
+          >
+            <div style={{ fontWeight: 900, color: cacheUsed ? "#10b981" : "#94a3b8", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+              {cacheUsed ? "✅ Cache Hit" : "🔄 Cache Miss"}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {cacheUsed && cacheExpiresInS !== undefined && (
+                <div>
+                  <span style={{ color: "#94a3b8" }}>Expires in:</span>{" "}
+                  <span style={{ fontWeight: 800, color: "white" }}>{cacheExpiresInS}s</span>
+                </div>
+              )}
+              <div style={{ wordBreak: "break-all", color: "#64748b", fontSize: 11 }}>
+                <span style={{ color: "#94a3b8" }}>Key:</span> {cacheKey}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Phase 4: Contract Version & Request ID */}
+        <div
+          style={{
+            marginTop: 12,
+            fontSize: 11,
+            color: "#64748b",
+            display: "flex",
+            gap: 16,
+            flexWrap: "wrap",
+          }}
+        >
+          <div>
+            <span style={{ color: "#94a3b8" }}>Contract:</span>{" "}
+            <span style={{ fontWeight: 700, color: "#cbd5e1" }}>{contractVersion}</span>
+          </div>
+          <div style={{ wordBreak: "break-all" }}>
+            <span style={{ color: "#94a3b8" }}>Request ID:</span>{" "}
+            <span style={{ fontWeight: 700, color: "#cbd5e1", fontFamily: "monospace" }}>{requestId}</span>
+          </div>
+        </div>
       </div>
 
       {/* Trends Preview */}
