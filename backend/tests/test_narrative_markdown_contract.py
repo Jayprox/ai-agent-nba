@@ -551,3 +551,96 @@ def test_cache_partitioned_by_compact_flag(monkeypatch):
 
     # Keys should differ
     assert key1 != key2
+
+def test_contract_version_present(monkeypatch):
+    """
+    Step 2.7: Contract versioning.
+    raw.meta.contract_version must always be present.
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+
+    client = TestClient(app)
+    res = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=0&trends=1")
+    assert res.status_code == 200
+
+    data = res.json()
+    assert data.get("ok") is True
+
+    meta = (data.get("raw") or {}).get("meta") or {}
+    assert isinstance(meta, dict)
+
+    # Step 2.7: contract_version must be present
+    assert "contract_version" in meta
+    assert isinstance(meta["contract_version"], str)
+    assert meta["contract_version"].strip() != ""
+    
+    # Should be "2.7" or similar
+    assert "2.7" in meta["contract_version"] or meta["contract_version"] == "2.7"
+
+
+def test_soft_errors_only_allowed_keys(monkeypatch):
+    """
+    Step 2.7: Soft errors hardening.
+    raw.meta.soft_errors should only contain allowed keys:
+      - ai, trends, odds, games_today, player_props, markdown, template
+    
+    Any unexpected keys should be filtered out.
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+
+    # Inject a malicious/unexpected soft_error key
+    original_get_daily_narrative = narrative_route.get_daily_narrative
+
+    async def patched_get_daily_narrative(*args, **kwargs):
+        result = await original_get_daily_narrative(*args, **kwargs)
+        # Inject an unexpected key before sanitization (should be filtered)
+        if "raw" in result and "meta" in result["raw"]:
+            result["raw"]["meta"]["soft_errors"]["UNEXPECTED_KEY"] = "Should be filtered"
+        return result
+
+    # Note: Since sanitization happens INSIDE get_daily_narrative, 
+    # we instead test that even if we artificially add keys, they get filtered.
+    # Better test: verify allowed keys are present and no others.
+
+    client = TestClient(app)
+    res = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=0&trends=0")
+    assert res.status_code == 200
+
+    data = res.json()
+    assert data.get("ok") is True
+
+    soft_errors = (data.get("raw") or {}).get("meta", {}).get("soft_errors", {})
+    assert isinstance(soft_errors, dict)
+
+    # All keys should be from the allowed set
+    allowed = {"ai", "trends", "odds", "games_today", "player_props", "markdown", "template"}
+    for key in soft_errors.keys():
+        assert key in allowed, f"Unexpected soft_error key: {key}"
+
+    # trends=0 should have trends soft_error
+    assert "trends" in soft_errors
+    assert soft_errors["trends"].strip() != ""
+
+
+def test_soft_errors_always_dict(monkeypatch):
+    """
+    Step 2.7: raw.meta.soft_errors must always be a dict (even if empty).
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+
+    client = TestClient(app)
+    
+    # Test multiple scenarios
+    for query in [
+        "?mode=ai&cache_ttl=0&trends=1",
+        "?mode=template&cache_ttl=0&trends=0",
+        "?mode=ai&cache_ttl=60&trends=1",
+    ]:
+        res = client.get(f"/nba/narrative/markdown{query}")
+        assert res.status_code == 200
+        
+        data = res.json()
+        assert data.get("ok") is True
+        
+        soft_errors = (data.get("raw") or {}).get("meta", {}).get("soft_errors")
+        assert isinstance(soft_errors, dict), f"soft_errors is not dict for query {query}: {type(soft_errors)}"

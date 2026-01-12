@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 from fastapi import APIRouter, Query
 
@@ -27,13 +28,28 @@ except Exception:
 router = APIRouter(prefix="/nba/narrative", tags=["Narrative"])
 
 # -------------------------
-# Config / Cache
+# Config / Cache / Contract
 # -------------------------
 _CACHE: Dict[str, Dict[str, Any]] = {}
 _INFLIGHT_LOCKS: Dict[str, asyncio.Lock] = {}
 _MAX_CACHE_TTL = 120
-_PROMPT_VERSION = "v3.8-cache-observability"
+_PROMPT_VERSION = "v3.9-contract-hardening"
+_CONTRACT_VERSION = "2.7"
 _ENV_ENABLE_TRENDS = os.getenv("ENABLE_TRENDS_IN_NARRATIVE", "0") == "1"
+
+# Step 2.7: Allowed soft_errors keys (contract hardening)
+_ALLOWED_SOFT_ERROR_KEYS: Set[str] = {
+    "ai",
+    "trends",
+    "odds",
+    "games_today",
+    "player_props",
+    "markdown",
+    "template",
+}
+
+# Logging
+logger = logging.getLogger(__name__)
 
 
 # -------------------------
@@ -49,6 +65,28 @@ def _now_iso() -> str:
 
 def _cap_ttl(ttl: int) -> int:
     return max(0, min(ttl, _MAX_CACHE_TTL))
+
+
+def _sanitize_soft_errors(soft_errors: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Step 2.7: Filter soft_errors to only include known/allowed keys.
+    Logs warnings for unexpected keys (helps detect bugs/typos).
+    Always returns a dict (even if empty).
+    """
+    if not isinstance(soft_errors, dict):
+        logger.warning(f"soft_errors is not a dict: {type(soft_errors).__name__}")
+        return {}
+
+    sanitized = {}
+    for key, value in soft_errors.items():
+        if key in _ALLOWED_SOFT_ERROR_KEYS:
+            # Ensure value is a string
+            sanitized[key] = str(value) if value is not None else ""
+        else:
+            # Log unexpected keys for debugging
+            logger.warning(f"Unexpected soft_error key filtered: {key}={value}")
+
+    return sanitized
 
 
 def _sha1_digest(obj: Any) -> str:
@@ -476,12 +514,16 @@ async def get_daily_narrative(
         )
         summary["metadata"] = metadata
 
+        # Step 2.7: Sanitize soft_errors before returning
+        soft_errors_sanitized = _sanitize_soft_errors(soft_errors)
+
         resp: Dict[str, Any] = {
             "ok": True,
             "summary": summary,
             "raw": {
                 **narrative_data,
                 "meta": {
+                    "contract_version": _CONTRACT_VERSION,  # Step 2.7
                     "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
                     "source_counts": {
                         "games_today": len(narrative_data.get("games_today", []) or []),
@@ -494,7 +536,7 @@ async def get_daily_narrative(
                     "cache_ttl_s": ttl,
                     "cache_key": cache_key,
                     "cache_expires_in_s": ttl,  # Fresh generation
-                    "soft_errors": soft_errors,  # ALWAYS present (dict)
+                    "soft_errors": soft_errors_sanitized,  # Step 2.7: sanitized
                     "mode": requested_mode,
                     "trends_enabled_in_narrative": bool(effective_trends),
                     "trends_override": override,
@@ -511,6 +553,8 @@ async def get_daily_narrative(
                 resp["markdown"] = _render_markdown(summary)
             except Exception as e:
                 soft_errors["markdown"] = f"Markdown render failed: {type(e).__name__}: {e}"
+                # Re-sanitize after adding markdown error
+                resp["raw"]["meta"]["soft_errors"] = _sanitize_soft_errors(soft_errors)
                 resp["markdown"] = _render_markdown(_fallback_summary(soft_errors["markdown"]))
 
         if ttl > 0:
@@ -593,7 +637,7 @@ async def get_markdown_narrative(
 
         # --- Guardrails: enforce minimum shape ---
         if not isinstance(data, dict):
-            data = {"ok": True, "summary": {}, "raw": {"meta": {"soft_errors": {}}}}
+            data = {"ok": True, "summary": {}, "raw": {"meta": {"soft_errors": {}, "contract_version": _CONTRACT_VERSION}}}
 
         data.setdefault("summary", {})
         if not isinstance(data["summary"], dict):
@@ -610,6 +654,9 @@ async def get_markdown_narrative(
         data["raw"].setdefault("meta", {})
         if not isinstance(data["raw"]["meta"], dict):
             data["raw"]["meta"] = {}
+
+        # Step 2.7: Ensure contract_version is present
+        data["raw"]["meta"].setdefault("contract_version", _CONTRACT_VERSION)
 
         data["raw"]["meta"].setdefault("soft_errors", {})
         if not isinstance(data["raw"]["meta"]["soft_errors"], dict):
@@ -634,6 +681,8 @@ async def get_markdown_narrative(
         except Exception as e:
             se = data["raw"]["meta"].setdefault("soft_errors", {})
             se["markdown"] = f"Markdown generation failed: {type(e).__name__}: {e}"
+            # Step 2.7: Sanitize after adding error
+            data["raw"]["meta"]["soft_errors"] = _sanitize_soft_errors(se)
             markdown = _render_markdown(_fallback_summary(se["markdown"]), compact=compact)
 
         data["markdown"] = markdown
@@ -645,6 +694,9 @@ async def get_markdown_narrative(
         meta["cache_key"] = cache_key
         meta["cache_ttl_s"] = ttl
         meta["cache_expires_in_s"] = ttl
+        
+        # Step 2.7: Final sanitization before caching/returning
+        meta["soft_errors"] = _sanitize_soft_errors(meta.get("soft_errors", {}))
         
         # Cache this markdown response
         if ttl > 0:
