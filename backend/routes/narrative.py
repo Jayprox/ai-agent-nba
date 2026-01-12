@@ -8,10 +8,11 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set, Tuple
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
 # --- Internal imports ---
 from agents.odds_agent.models import OddsResponse
@@ -33,7 +34,7 @@ router = APIRouter(prefix="/nba/narrative", tags=["Narrative"])
 _CACHE: Dict[str, Dict[str, Any]] = {}
 _INFLIGHT_LOCKS: Dict[str, asyncio.Lock] = {}
 _MAX_CACHE_TTL = 120
-_PROMPT_VERSION = "v3.9-contract-hardening"
+_PROMPT_VERSION = "v3.10-structured-logging"
 _CONTRACT_VERSION = "2.7"
 _ENV_ENABLE_TRENDS = os.getenv("ENABLE_TRENDS_IN_NARRATIVE", "0") == "1"
 
@@ -48,8 +49,86 @@ _ALLOWED_SOFT_ERROR_KEYS: Set[str] = {
     "template",
 }
 
-# Logging
+# Step 2.8: Structured logging
 logger = logging.getLogger(__name__)
+
+
+# -------------------------
+# Step 2.8: Logging Helpers
+# -------------------------
+def _log_request_start(*, request_id: str, mode: str, trends: Optional[int], cache_ttl: int, endpoint: str):
+    """Log incoming request with context."""
+    logger.info(
+        f"narrative.request_start | request_id={request_id} | endpoint={endpoint} | "
+        f"mode={mode} | trends={trends} | cache_ttl={cache_ttl}"
+    )
+
+
+def _log_cache_event(*, request_id: str, event: str, cache_key: str, ttl: int = 0, expires_in: float = 0):
+    """Log cache hit/miss/store events."""
+    if event == "hit":
+        logger.info(
+            f"narrative.cache_hit | request_id={request_id} | cache_key={cache_key} | expires_in={expires_in:.2f}s"
+        )
+    elif event == "miss":
+        logger.info(
+            f"narrative.cache_miss | request_id={request_id} | cache_key={cache_key} | will_cache={ttl > 0}"
+        )
+    elif event == "store":
+        logger.info(
+            f"narrative.cache_store | request_id={request_id} | cache_key={cache_key} | ttl={ttl}s"
+        )
+
+
+def _log_ai_gating(*, request_id: str, mode: str, ai_allowed: bool, reason: str = ""):
+    """Log AI gating decision."""
+    if mode == "ai" and not ai_allowed:
+        logger.warning(
+            f"narrative.ai_blocked | request_id={request_id} | mode={mode} | ai_allowed={ai_allowed} | reason={reason}"
+        )
+    else:
+        logger.info(
+            f"narrative.ai_gating | request_id={request_id} | mode={mode} | ai_allowed={ai_allowed}"
+        )
+
+
+def _log_ai_fallback(*, request_id: str, reason: str):
+    """Log AI fallback with reason."""
+    logger.warning(
+        f"narrative.ai_fallback | request_id={request_id} | reason={reason}"
+    )
+
+
+def _log_trends_status(*, request_id: str, enabled: bool, override: Optional[bool], error: Optional[str] = None):
+    """Log trends integration status."""
+    if error:
+        logger.warning(
+            f"narrative.trends_disabled | request_id={request_id} | enabled={enabled} | override={override} | reason={error}"
+        )
+    else:
+        logger.info(
+            f"narrative.trends_status | request_id={request_id} | enabled={enabled} | override={override}"
+        )
+
+
+def _log_data_fetch(*, request_id: str, source: str, success: bool, error: Optional[str] = None, count: int = 0):
+    """Log data fetch results."""
+    if not success:
+        logger.warning(
+            f"narrative.fetch_failed | request_id={request_id} | source={source} | error={error}"
+        )
+    else:
+        logger.debug(
+            f"narrative.fetch_ok | request_id={request_id} | source={source} | count={count}"
+        )
+
+
+def _log_response_ready(*, request_id: str, latency_ms: float, cache_used: bool, ai_used: bool, soft_error_count: int):
+    """Log request completion with timing."""
+    logger.info(
+        f"narrative.response_ready | request_id={request_id} | latency_ms={latency_ms:.2f} | "
+        f"cache_used={cache_used} | ai_used={ai_used} | soft_errors={soft_error_count}"
+    )
 
 
 # -------------------------
@@ -347,8 +426,20 @@ async def get_daily_narrative(
         description="Override trends in narrative: 1=on, 0=off, omit=use env default",
     ),
 ) -> Dict[str, Any]:
+    # Step 2.8: Generate request ID for tracing
+    request_id = str(uuid.uuid4())[:8]
+    
     t0 = time.perf_counter()
     ttl = _cap_ttl(cache_ttl)
+
+    # Step 2.8: Log request start
+    _log_request_start(
+        request_id=request_id,
+        mode=mode,
+        trends=trends,
+        cache_ttl=ttl,
+        endpoint="/today"
+    )
 
     # --- Determine effective trends setting (needed for cache partition) ---
     override = _parse_trends_override(trends)
@@ -356,6 +447,14 @@ async def get_daily_narrative(
 
     # --- Determine AI gating (needed for cache partition) ---
     ai_allowed = _ai_allowed()
+    
+    # Step 2.8: Log AI gating decision
+    _log_ai_gating(
+        request_id=request_id,
+        mode=mode,
+        ai_allowed=ai_allowed,
+        reason="OPENAI_API_KEY missing or DISABLE_AI=1" if not ai_allowed else ""
+    )
 
     # --- Step 2.6: Cache key MUST include trends + format + ai_allowed ---
     cache_key = _build_cache_key(
@@ -372,6 +471,16 @@ async def get_daily_narrative(
     # --- Step 2.6: Check cache before acquiring lock ---
     cached = _CACHE.get(cache_key)
     if cached and cached["expires_at"] > time.time():
+        expires_in = cached["expires_at"] - time.time()
+        
+        # Step 2.8: Log cache hit
+        _log_cache_event(
+            request_id=request_id,
+            event="hit",
+            cache_key=cache_key,
+            expires_in=expires_in
+        )
+        
         payload = dict(cached["payload"])
         try:
             payload.setdefault("raw", {}).setdefault("meta", {})
@@ -380,10 +489,19 @@ async def get_daily_narrative(
             meta["cache_used"] = True
             meta["cache_key"] = cache_key
             meta["cache_ttl_s"] = ttl
-            meta["cache_expires_in_s"] = round(cached["expires_at"] - time.time(), 2)
+            meta["cache_expires_in_s"] = round(expires_in, 2)
+            meta["request_id"] = request_id  # Step 2.8
         except Exception:
             pass
         return payload
+
+    # Step 2.8: Log cache miss
+    _log_cache_event(
+        request_id=request_id,
+        event="miss",
+        cache_key=cache_key,
+        ttl=ttl
+    )
 
     # --- Step 2.6: Stampede protection via inflight lock ---
     if cache_key not in _INFLIGHT_LOCKS:
@@ -395,6 +513,13 @@ async def get_daily_narrative(
         # Double-check cache after acquiring lock (another request may have populated it)
         cached = _CACHE.get(cache_key)
         if cached and cached["expires_at"] > time.time():
+            expires_in = cached["expires_at"] - time.time()
+            _log_cache_event(
+                request_id=request_id,
+                event="hit",
+                cache_key=cache_key,
+                expires_in=expires_in
+            )
             payload = dict(cached["payload"])
             try:
                 payload.setdefault("raw", {}).setdefault("meta", {})
@@ -403,12 +528,14 @@ async def get_daily_narrative(
                 meta["cache_used"] = True
                 meta["cache_key"] = cache_key
                 meta["cache_ttl_s"] = ttl
-                meta["cache_expires_in_s"] = round(cached["expires_at"] - time.time(), 2)
+                meta["cache_expires_in_s"] = round(expires_in, 2)
+                meta["request_id"] = request_id
             except Exception:
                 pass
             return payload
 
         # --- Parallel data fetches (games + odds, trends optional) ---
+        t_fetch_start = time.perf_counter()
         games_task = _safe_await("games_today", get_today_games())
         odds_task = _safe_call("odds", fetch_moneyline_odds)
 
@@ -430,11 +557,28 @@ async def get_daily_narrative(
         else:
             (games, odds) = await asyncio.gather(games_task, odds_task)
 
+        t_fetch_ms = (time.perf_counter() - t_fetch_start) * 1000
+
         # --- Soft errors always present ---
         soft_errors: Dict[str, str] = {}
 
         games_today, games_err = games
         odds_data, odds_err = odds
+
+        # Step 2.8: Log data fetch results
+        _log_data_fetch(
+            request_id=request_id,
+            source="games_today",
+            success=not bool(games_err),
+            error=games_err,
+            count=len(games_today or [])
+        )
+        _log_data_fetch(
+            request_id=request_id,
+            source="odds",
+            success=not bool(odds_err),
+            error=odds_err
+        )
 
         if games_err:
             soft_errors["games_today"] = games_err
@@ -442,6 +586,14 @@ async def get_daily_narrative(
             soft_errors["odds"] = odds_err
         if trends_err:
             soft_errors["trends"] = trends_err
+
+        # Step 2.8: Log trends status
+        _log_trends_status(
+            request_id=request_id,
+            enabled=bool(effective_trends),
+            override=override,
+            error=trends_err
+        )
 
         # Explicitly mark player props as backlogged / disabled for now
         soft_errors["player_props"] = "Live player props integration temporarily disabled (backlog)."
@@ -471,18 +623,28 @@ async def get_daily_narrative(
         summary_obj: Any = None
 
         if ai_requested and not ai_allowed:
-            soft_errors["ai"] = "AI mode requested but not allowed (OPENAI_API_KEY missing/disabled)."
+            ai_block_reason = "AI mode requested but not allowed (OPENAI_API_KEY missing/disabled)."
+            soft_errors["ai"] = ai_block_reason
             summary_obj = _fallback_summary(soft_errors["ai"])
             ai_used = False
+            
+            # Step 2.8: Log AI blocked
+            _log_ai_fallback(request_id=request_id, reason=ai_block_reason)
         else:
+            t_ai_start = time.perf_counter()
             try:
                 # Call the generator with the requested mode.
                 summary_obj = generate_narrative_summary(narrative_data, mode=requested_mode)
                 ai_used = bool(ai_requested)  # only counts as used if mode=ai AND we got a usable result
+                t_ai_ms = (time.perf_counter() - t_ai_start) * 1000
+                logger.debug(f"narrative.ai_generation | request_id={request_id} | ai_latency_ms={t_ai_ms:.2f}")
             except Exception as e:
+                t_ai_ms = (time.perf_counter() - t_ai_start) * 1000
                 # Soft-fallback on throw (tests require substring "AI generation threw")
                 if ai_requested:
-                    soft_errors["ai"] = f"AI generation threw: {type(e).__name__}: {e}"
+                    fallback_reason = f"AI generation threw: {type(e).__name__}: {e}"
+                    soft_errors["ai"] = fallback_reason
+                    _log_ai_fallback(request_id=request_id, reason=fallback_reason)
                 else:
                     soft_errors["template"] = f"Template generation threw: {type(e).__name__}: {e}"
                 summary_obj = _fallback_summary(soft_errors.get("ai") or soft_errors.get("template") or "Generation failed.")
@@ -517,6 +679,8 @@ async def get_daily_narrative(
         # Step 2.7: Sanitize soft_errors before returning
         soft_errors_sanitized = _sanitize_soft_errors(soft_errors)
 
+        total_latency_ms = (time.perf_counter() - t0) * 1000
+
         resp: Dict[str, Any] = {
             "ok": True,
             "summary": summary,
@@ -524,7 +688,12 @@ async def get_daily_narrative(
                 **narrative_data,
                 "meta": {
                     "contract_version": _CONTRACT_VERSION,  # Step 2.7
-                    "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
+                    "request_id": request_id,  # Step 2.8
+                    "latency_ms": round(total_latency_ms, 2),
+                    "latency_breakdown": {  # Step 2.8
+                        "fetch_ms": round(t_fetch_ms, 2),
+                        "total_ms": round(total_latency_ms, 2),
+                    },
                     "source_counts": {
                         "games_today": len(narrative_data.get("games_today", []) or []),
                         "player_trends": len(narrative_data.get("player_trends", [])),
@@ -557,8 +726,18 @@ async def get_daily_narrative(
                 resp["raw"]["meta"]["soft_errors"] = _sanitize_soft_errors(soft_errors)
                 resp["markdown"] = _render_markdown(_fallback_summary(soft_errors["markdown"]))
 
+        # Step 2.8: Log response ready
+        _log_response_ready(
+            request_id=request_id,
+            latency_ms=total_latency_ms,
+            cache_used=False,
+            ai_used=bool(ai_used),
+            soft_error_count=len(soft_errors_sanitized)
+        )
+
         if ttl > 0:
             _CACHE[cache_key] = {"expires_at": time.time() + ttl, "payload": resp}
+            _log_cache_event(request_id=request_id, event="store", cache_key=cache_key, ttl=ttl)
 
         return resp
 
@@ -576,6 +755,18 @@ async def get_markdown_narrative(
         description="Override trends in narrative: 1=on, 0=off, omit=use env default",
     ),
 ) -> Dict[str, Any]:
+    # Step 2.8: Generate request ID
+    request_id = str(uuid.uuid4())[:8]
+    
+    # Step 2.8: Log request start
+    _log_request_start(
+        request_id=request_id,
+        mode=mode,
+        trends=trends,
+        cache_ttl=cache_ttl,
+        endpoint="/markdown"
+    )
+
     # Step 2.6: /markdown has its own cache key (includes compact flag)
     override = _parse_trends_override(trends)
     effective_trends = _ENV_ENABLE_TRENDS if override is None else override
@@ -596,6 +787,16 @@ async def get_markdown_narrative(
     # Check cache before lock
     cached = _CACHE.get(cache_key)
     if cached and cached["expires_at"] > time.time():
+        expires_in = cached["expires_at"] - time.time()
+        
+        # Step 2.8: Log cache hit
+        _log_cache_event(
+            request_id=request_id,
+            event="hit",
+            cache_key=cache_key,
+            expires_in=expires_in
+        )
+        
         payload = dict(cached["payload"])
         try:
             payload.setdefault("raw", {}).setdefault("meta", {})
@@ -604,10 +805,29 @@ async def get_markdown_narrative(
             meta["cache_used"] = True
             meta["cache_key"] = cache_key
             meta["cache_ttl_s"] = ttl
-            meta["cache_expires_in_s"] = round(cached["expires_at"] - time.time(), 2)
+            meta["cache_expires_in_s"] = round(expires_in, 2)
+            meta["request_id"] = request_id
         except Exception:
             pass
+        
+        # Step 2.8: Log response from cache
+        _log_response_ready(
+            request_id=request_id,
+            latency_ms=0.0,
+            cache_used=True,
+            ai_used=meta.get("ai_used", False),
+            soft_error_count=len(meta.get("soft_errors", {}))
+        )
+        
         return payload
+    
+    # Step 2.8: Log cache miss
+    _log_cache_event(
+        request_id=request_id,
+        event="miss",
+        cache_key=cache_key,
+        ttl=ttl
+    )
     
     # Stampede protection
     if cache_key not in _INFLIGHT_LOCKS:
@@ -619,6 +839,13 @@ async def get_markdown_narrative(
         # Double-check cache
         cached = _CACHE.get(cache_key)
         if cached and cached["expires_at"] > time.time():
+            expires_in = cached["expires_at"] - time.time()
+            _log_cache_event(
+                request_id=request_id,
+                event="hit",
+                cache_key=cache_key,
+                expires_in=expires_in
+            )
             payload = dict(cached["payload"])
             try:
                 payload.setdefault("raw", {}).setdefault("meta", {})
@@ -627,7 +854,8 @@ async def get_markdown_narrative(
                 meta["cache_used"] = True
                 meta["cache_key"] = cache_key
                 meta["cache_ttl_s"] = ttl
-                meta["cache_expires_in_s"] = round(cached["expires_at"] - time.time(), 2)
+                meta["cache_expires_in_s"] = round(expires_in, 2)
+                meta["request_id"] = request_id
             except Exception:
                 pass
             return payload
@@ -657,6 +885,9 @@ async def get_markdown_narrative(
 
         # Step 2.7: Ensure contract_version is present
         data["raw"]["meta"].setdefault("contract_version", _CONTRACT_VERSION)
+        
+        # Step 2.8: Update request_id for /markdown endpoint
+        data["raw"]["meta"]["request_id"] = request_id
 
         data["raw"]["meta"].setdefault("soft_errors", {})
         if not isinstance(data["raw"]["meta"]["soft_errors"], dict):
@@ -698,8 +929,18 @@ async def get_markdown_narrative(
         # Step 2.7: Final sanitization before caching/returning
         meta["soft_errors"] = _sanitize_soft_errors(meta.get("soft_errors", {}))
         
+        # Step 2.8: Log response ready
+        _log_response_ready(
+            request_id=request_id,
+            latency_ms=meta.get("latency_ms", 0.0),
+            cache_used=False,
+            ai_used=data.get("summary", {}).get("metadata", {}).get("ai_used", False),
+            soft_error_count=len(meta.get("soft_errors", {}))
+        )
+        
         # Cache this markdown response
         if ttl > 0:
             _CACHE[cache_key] = {"expires_at": time.time() + ttl, "payload": data}
+            _log_cache_event(request_id=request_id, event="store", cache_key=cache_key, ttl=ttl)
 
         return data
