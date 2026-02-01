@@ -23,17 +23,16 @@ jobs:
       - name: Build And Deploy
         id: builddeploy
         uses: Azure/static-web-apps-deploy@v1
+        env:
+          # ✅ Build-time env var for Vite (this is the fix)
+          VITE_API_BASE_URL: https://nba-backend.nicesand-609e915a.eastus.azurecontainerapps.io
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_LEMON_BAY_0DDCFF40F }}
-          repo_token: ${{ secrets.GITHUB_TOKEN }} # Used for Github integrations (i.e. PR comments)
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: "upload"
-          ###### Repository/Build Configurations ######
-          app_location: "frontend" # App source code path
-          api_location: "" # Api source code path - optional
-          output_location: "dist" # Built app content directory - optional
-          ###### End of Repository/Build Configurations ######
-        env:
-          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          app_location: "frontend"
+          api_location: ""
+          output_location: "dist"
 
   close_pull_request_job:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
@@ -46,4 +45,3 @@ jobs:
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_LEMON_BAY_0DDCFF40F }}
           action: "close"
-
