@@ -3,11 +3,11 @@ name: Azure Static Web Apps CI/CD
 on:
   push:
     branches:
-      - azure-deploy
+      - main
   pull_request:
     types: [opened, synchronize, reopened, closed]
     branches:
-      - azure-deploy
+      - main
 
 jobs:
   build_and_deploy_job:
@@ -44,3 +44,4 @@ jobs:
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_LEMON_BAY_0DDCFF40F }}
           action: "close"
+
