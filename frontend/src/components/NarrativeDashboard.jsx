@@ -1,8 +1,7 @@
 // frontend/src/components/NarrativeDashboard.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+import { API_BASE_URL } from "../config/api";
 
 // -----------------------------
 // Storage keys
@@ -408,7 +407,7 @@ const NarrativeDashboard = () => {
       if (override === true) params.set("trends", "1");
       if (override === false) params.set("trends", "0");
 
-      const url = `${API_BASE}/nba/narrative/markdown?${params.toString()}`;
+      const url = `${API_BASE_URL}/nba/narrative/markdown?${params.toString()}`;
 
       console.log("🔍 [NarrativeDashboard D7] Fetching:", {
         url,
@@ -499,7 +498,7 @@ const NarrativeDashboard = () => {
   };
 
   useEffect(() => {
-    console.log("🧩 [NarrativeDashboard D7] Mount. API_BASE =", API_BASE);
+    console.log("🧩 [NarrativeDashboard D7] Mount. API_BASE_URL =", API_BASE_URL);
     fetchMarkdown({ reason: "mount" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
