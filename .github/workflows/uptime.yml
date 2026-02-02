@@ -1,0 +1,15 @@
+name: Uptime Check
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"  # every 10 minutes
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Health check
+        run: |
+          set -e
+          curl -fsS "https://nba-backend.nicesand-609e915a.eastus.azurecontainerapps.io/health" | jq .
