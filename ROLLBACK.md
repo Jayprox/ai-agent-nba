@@ -1,5 +1,7 @@
 # ROLLBACK — AI Agent NBA
 
+## 🔥 90-second Production Sanity Checks (copy/paste)
+
 ## Goal
 Return production to a known-good state quickly if a deploy breaks prod.
 
