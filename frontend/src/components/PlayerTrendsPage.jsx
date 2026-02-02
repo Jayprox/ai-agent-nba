@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
+import { API_BASE_URL } from "../config/api";
 
-const MOCK_URL = "http://127.0.0.1:8000/nba/player/trends";
+const MOCK_URL = `${API_BASE_URL}/nba/player/trends`;
 // future live endpoint (placeholder)
-const LIVE_URL = "http://127.0.0.1:8000/nba/player/trends?mode=live";
+const LIVE_URL = `${API_BASE_URL}/nba/player/trends?mode=live`;
 
 const PlayerTrendsPage = () => {
   const [data, setData] = useState(null);

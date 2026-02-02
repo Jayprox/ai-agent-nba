@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { API_BASE_URL } from "../config/api";
 
 const Badge = ({ stale }) => (
   <span
@@ -32,7 +33,7 @@ const PlayerLiveCombined = () => {
     setError(null);
     try {
       const res = await fetch(
-        `http://127.0.0.1:8000/nba/player/live/combined/${teamId}`
+        `${API_BASE_URL}/nba/player/live/combined/${teamId}`
       );
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
       const json = await res.json();

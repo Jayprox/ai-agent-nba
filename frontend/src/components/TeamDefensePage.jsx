@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE_URL } from "../config/api";
 
 const TeamDefensePage = () => {
   const [defenseData, setDefenseData] = useState(null);
@@ -8,7 +9,7 @@ const TeamDefensePage = () => {
   useEffect(() => {
     const fetchDefense = async () => {
       try {
-        const res = await fetch("http://127.0.0.1:8000/nba/defense/teams");
+        const res = await fetch(`${API_BASE_URL}/nba/defense/teams`);
         if (!res.ok) throw new Error("Failed to fetch team defense data");
         const data = await res.json();
         setDefenseData(data);

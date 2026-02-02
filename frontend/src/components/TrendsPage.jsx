@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE_URL } from "../config/api";
 
 const TrendsPage = () => {
   const [trends, setTrends] = useState(null);
@@ -11,8 +12,8 @@ const TrendsPage = () => {
     setError("");
     try {
       const endpoint = useLive
-        ? "http://127.0.0.1:8000/nba/trends/live"
-        : "http://127.0.0.1:8000/nba/trends";
+        ? `${API_BASE_URL}/nba/trends/live`
+        : `${API_BASE_URL}/nba/trends`;
       const res = await fetch(endpoint);
       if (!res.ok) throw new Error(`Failed to fetch data from ${endpoint}`);
       const data = await res.json();

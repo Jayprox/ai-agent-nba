@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { API_BASE_URL } from "../config/api";
 
 const PlayerLive = () => {
   const [teamId, setTeamId] = useState("134");
@@ -10,7 +11,7 @@ const PlayerLive = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`http://127.0.0.1:8000/nba/player/live/${teamId}`);
+      const res = await fetch(`${API_BASE_URL}/nba/player/live/${teamId}`);
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
       const json = await res.json();
       setData(json.data);

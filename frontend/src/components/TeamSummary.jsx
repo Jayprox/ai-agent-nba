@@ -1,5 +1,6 @@
 // frontend/src/pages/TeamSummary.jsx
 import React, { useState, useEffect, useRef } from "react";
+import { API_BASE_URL } from "../config/api";
 
 const TeamSummary = () => {
   const [teamId, setTeamId] = useState("134");
@@ -16,7 +17,7 @@ const TeamSummary = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`http://127.0.0.1:8000/nba/team/summary/${teamId}`);
+      const res = await fetch(`${API_BASE_URL}/nba/team/summary/${teamId}`);
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
       const json = await res.json();
       setData(json);

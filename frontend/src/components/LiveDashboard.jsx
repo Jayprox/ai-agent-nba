@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { API_BASE_URL } from "../config/api";
 
 const LiveDashboard = () => {
   const [games, setGames] = useState([]);
@@ -8,7 +9,7 @@ const LiveDashboard = () => {
   const fetchGames = async () => {
     setLoading(true);
     try {
-      const res = await fetch("http://127.0.0.1:8000/nba/games/today");
+      const res = await fetch(`${API_BASE_URL}/nba/games/today`);
       const json = await res.json();
       setGames(json.games || []);
     } catch (e) {
@@ -84,7 +85,7 @@ const LiveDashboard = () => {
 
                 <div style={{ display: "flex", gap: 20, marginTop: 20 }}>
                   <iframe
-                    src={`http://localhost:5173/team-summary?team=${selectedGame.home_team.id}`}
+                    src={`/team-summary?team=${selectedGame.home_team.id}`}
                     style={{
                       width: "48%",
                       height: "400px",
@@ -95,7 +96,7 @@ const LiveDashboard = () => {
                     title="Home Team Summary"
                   />
                   <iframe
-                    src={`http://localhost:5173/player-live-combined?team=${selectedGame.home_team.id}`}
+                    src={`/player-live-combined?team=${selectedGame.home_team.id}`}
                     style={{
                       width: "48%",
                       height: "400px",

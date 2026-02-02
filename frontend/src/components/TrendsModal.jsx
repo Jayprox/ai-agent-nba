@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE_URL } from "../config/api";
 
 const modalOverlay = {
   position: "fixed",
@@ -36,7 +37,7 @@ useEffect(() => {
   const fetchTrends = async () => {
     try {
       const res = await fetch(
-        `http://127.0.0.1:8000/nba/trends/live?team=${encodeURIComponent(teamName)}`
+        `${API_BASE_URL}/nba/trends/live?team=${encodeURIComponent(teamName)}`
       );
       if (!res.ok) throw new Error("Failed to fetch trends data");
       const data = await res.json();

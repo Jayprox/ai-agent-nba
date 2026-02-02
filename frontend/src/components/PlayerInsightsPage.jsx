@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
+import { API_BASE_URL } from "../config/api";
 
-const MOCK_URL = "http://127.0.0.1:8000/nba/player/insights";
-const LIVE_URL = "http://127.0.0.1:8000/nba/player/insights/live"; // placeholder for live data later
+const MOCK_URL = `${API_BASE_URL}/nba/player/insights`;
+const LIVE_URL = `${API_BASE_URL}/nba/player/insights/live`; // placeholder for live data later
 
 
 const PlayerInsightsPage = () => {

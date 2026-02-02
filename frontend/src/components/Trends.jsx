@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { API_BASE_URL } from "../config/api";
 
 const Trends = () => {
   const [data, setData] = useState(null);
@@ -10,7 +11,7 @@ const Trends = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("http://127.0.0.1:8000/nba/trends/live");
+      const res = await fetch(`${API_BASE_URL}/nba/trends/live`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       setData(json);

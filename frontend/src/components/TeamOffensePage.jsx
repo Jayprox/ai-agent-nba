@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import TrendsModal from "./TrendsModal";
+import { API_BASE_URL } from "../config/api";
 
 const TeamOffensePage = () => {
   const [offenseData, setOffenseData] = useState(null);
@@ -10,7 +11,7 @@ const TeamOffensePage = () => {
   useEffect(() => {
     const fetchOffenseData = async () => {
       try {
-        const res = await fetch("http://127.0.0.1:8000/nba/offense/teams");
+        const res = await fetch(`${API_BASE_URL}/nba/offense/teams`);
         if (!res.ok) throw new Error(`Failed to fetch data (${res.status})`);
         const data = await res.json();
         setOffenseData(data);
