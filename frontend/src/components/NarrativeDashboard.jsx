@@ -9,8 +9,47 @@ import { API_BASE_URL } from "../config/api";
 const LS_TRENDS_OVERRIDE = "narrative.trendsOverride"; // "default" | "on" | "off"
 const LS_COMPACT = "narrative.compact"; // "1" | "0"
 const LS_CACHE_TTL = "narrative.cacheTtl"; // "0" | "15" | "60" | "120"
+const LS_SHOW_CONTRACT = "narrative.showContract"; // "1" | "0"
+const LS_SHOW_TRENDS_PREVIEW = "narrative.showTrendsPreview"; // "1" | "0"
 
 const ALLOWED_TTLS = [0, 15, 60, 120];
+const SOFT_ERROR_LABELS = {
+  ai: "AI",
+  trends: "Trends",
+  odds: "Odds",
+  games_today: "Games",
+  player_props: "Player Props",
+  markdown: "Markdown",
+  template: "Template",
+};
+const SOURCE_LABELS = {
+  games_today: "Games",
+  odds: "Odds",
+  trends: "Trends",
+  player_props: "Player Props",
+};
+const SOURCE_STATUS_STYLES = {
+  ok: {
+    border: "1px solid rgba(16,185,129,0.35)",
+    background: "rgba(16,185,129,0.12)",
+    color: "#bbf7d0",
+  },
+  no_data: {
+    border: "1px solid rgba(148,163,184,0.35)",
+    background: "rgba(148,163,184,0.12)",
+    color: "#e5e7eb",
+  },
+  disabled: {
+    border: "1px solid rgba(251,191,36,0.35)",
+    background: "rgba(251,191,36,0.12)",
+    color: "#fde68a",
+  },
+  error: {
+    border: "1px solid rgba(239,68,68,0.35)",
+    background: "rgba(239,68,68,0.12)",
+    color: "#fecaca",
+  },
+};
 
 function safeToLocalString(iso) {
   try {
@@ -255,6 +294,22 @@ function loadCacheTtlFromStorage() {
   }
 }
 
+function loadShowContractFromStorage() {
+  try {
+    return localStorage.getItem(LS_SHOW_CONTRACT) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function loadShowTrendsPreviewFromStorage() {
+  try {
+    return localStorage.getItem(LS_SHOW_TRENDS_PREVIEW) !== "0";
+  } catch {
+    return true;
+  }
+}
+
 async function copyToClipboard(text) {
   const value = String(text ?? "");
   if (!value) return false;
@@ -307,6 +362,15 @@ const NarrativeDashboard = () => {
   );
   const [compact, setCompact] = useState(() => loadCompactFromStorage());
   const [cacheTtl, setCacheTtl] = useState(() => loadCacheTtlFromStorage());
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth : 1024
+  );
+  const [showContractSnapshot, setShowContractSnapshot] = useState(() =>
+    loadShowContractFromStorage()
+  );
+  const [showTrendsPreview, setShowTrendsPreview] = useState(() =>
+    loadShowTrendsPreviewFromStorage()
+  );
 
   // Last-good snapshot (used to avoid "blank page" on error)
   const [lastGood, setLastGood] = useState(null);
@@ -334,10 +398,12 @@ const NarrativeDashboard = () => {
       );
       localStorage.setItem(LS_COMPACT, compact ? "1" : "0");
       localStorage.setItem(LS_CACHE_TTL, String(cacheTtl));
+      localStorage.setItem(LS_SHOW_CONTRACT, showContractSnapshot ? "1" : "0");
+      localStorage.setItem(LS_SHOW_TRENDS_PREVIEW, showTrendsPreview ? "1" : "0");
     } catch {
       // no-op
     }
-  }, [trendsOverride, compact, cacheTtl]);
+  }, [trendsOverride, compact, cacheTtl, showContractSnapshot, showTrendsPreview]);
 
   // Abort fetch on unmount
   useEffect(() => {
@@ -353,6 +419,13 @@ const NarrativeDashboard = () => {
         // no-op
       }
     };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   }, []);
 
   const flashCopyStatus = (msg) => {
@@ -572,9 +645,18 @@ const NarrativeDashboard = () => {
   const scGames = sourceCounts?.games_today;
   const scPlayerTrends = sourceCounts?.player_trends;
   const scTeamTrends = sourceCounts?.team_trends;
+  const scPlayerProps = sourceCounts?.player_props;
+  const scOddsGames = sourceCounts?.odds_games;
 
   // Phase 4: Enhanced observability
   const softErrors = displayRawMeta?.soft_errors || {};
+  const softErrorEntries = Object.entries(softErrors).filter(
+    ([key, value]) => SOFT_ERROR_LABELS[key] && String(value || "").trim() !== ""
+  );
+  const sourceStatus = displayRawMeta?.source_status || {};
+  const sourceStatusEntries = Object.entries(sourceStatus).filter(
+    ([key]) => SOURCE_LABELS[key]
+  );
   const contractVersion = displayRawMeta?.contract_version || "—";
   const requestId = displayRawMeta?.request_id || "—";
   const cacheExpiresInS = displayRawMeta?.cache_expires_in_s;
@@ -617,9 +699,17 @@ const NarrativeDashboard = () => {
   const slateDateLabel = guessSlateDateLabel(displayGamesToday);
   const slateTz = pickTimezone(displayGamesToday, displayRawMeta?.timezone);
   const matchups = buildMatchups(displayGamesToday, 5);
+  const isMobile = viewportWidth < 768;
+  const containerPad = isMobile ? 14 : 24;
+  const cardPad = isMobile ? 12 : 14;
+  const sectionGap = isMobile ? 8 : 10;
+  const trendsRowPad = isMobile ? "8px 10px" : "9px 11px";
+  const trendsTitleSize = isMobile ? 12 : 13;
+  const trendsMetaSize = isMobile ? 11 : 12;
+  const trendsBadgePad = isMobile ? "4px 8px" : "5px 10px";
 
   return (
-    <div style={{ padding: 24, color: "white", maxWidth: 980, margin: "0 auto" }}>
+    <div style={{ padding: containerPad, color: "white", maxWidth: 980, margin: "0 auto" }}>
       {/* Error banner (but keep rendering last-good) */}
       {error ? (
         <div
@@ -670,14 +760,14 @@ const NarrativeDashboard = () => {
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          gap: 12,
-          marginBottom: 16,
+          gap: isMobile ? 10 : 12,
+          marginBottom: isMobile ? 12 : 16,
           flexWrap: "wrap",
         }}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>
+            <h1 style={{ fontSize: isMobile ? 18 : 22, fontWeight: 800, margin: 0 }}>
               AI Narrative Dashboard
             </h1>
             <span
@@ -716,12 +806,12 @@ const NarrativeDashboard = () => {
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: sectionGap, flexWrap: "wrap", alignItems: "center", width: isMobile ? "100%" : "auto" }}>
           {/* Copy buttons */}
           <button
             onClick={() => onCopyMarkdown(displayMarkdown)}
             style={{
-              padding: "10px 12px",
+              padding: isMobile ? "8px 10px" : "10px 12px",
               borderRadius: 10,
               fontWeight: 800,
               border: "1px solid #334155",
@@ -744,6 +834,8 @@ const NarrativeDashboard = () => {
               borderRadius: 12,
               border: "1px solid #334155",
               background: "rgba(11,18,32,0.85)",
+              width: isMobile ? "100%" : "auto",
+              overflowX: isMobile ? "auto" : "visible",
             }}
           >
             <span style={{ fontSize: 12, color: "#9ca3af", paddingLeft: 6 }}>
@@ -801,12 +893,14 @@ const NarrativeDashboard = () => {
           <div
             style={{
               display: "flex",
-              gap: 10,
+              gap: sectionGap,
               alignItems: "center",
               padding: 6,
               borderRadius: 12,
               border: "1px solid #334155",
               background: "rgba(11,18,32,0.85)",
+              width: isMobile ? "100%" : "auto",
+              flexWrap: "wrap",
             }}
           >
             <span style={{ fontSize: 12, color: "#9ca3af", paddingLeft: 6 }}>
@@ -859,7 +953,7 @@ const NarrativeDashboard = () => {
             }}
             disabled={isRegenerating}
             style={{
-              padding: "10px 14px",
+              padding: isMobile ? "8px 12px" : "10px 14px",
               borderRadius: 10,
               fontWeight: 700,
               border: "1px solid #334155",
@@ -876,18 +970,18 @@ const NarrativeDashboard = () => {
       {/* Slate Header */}
       <div
         style={{
-          marginBottom: 12,
+          marginBottom: isMobile ? 10 : 12,
           border: "1px solid #334155",
           background: "rgba(17,24,39,0.75)",
           borderRadius: 14,
-          padding: 14,
+          padding: cardPad,
         }}
       >
         <div
           style={{
             display: "flex",
             flexWrap: "wrap",
-            gap: 10,
+            gap: sectionGap,
             justifyContent: "space-between",
             alignItems: "center",
           }}
@@ -970,18 +1064,18 @@ const NarrativeDashboard = () => {
       {/* Contract Snapshot */}
       <div
         style={{
-          marginBottom: 16,
+          marginBottom: isMobile ? 12 : 16,
           border: "1px solid #334155",
           background: "rgba(11,18,32,0.75)",
           borderRadius: 14,
-          padding: 14,
+          padding: cardPad,
         }}
       >
         <div
           style={{
             display: "flex",
             justifyContent: "space-between",
-            gap: 10,
+            gap: sectionGap,
             flexWrap: "wrap",
           }}
         >
@@ -994,6 +1088,47 @@ const NarrativeDashboard = () => {
           </div>
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              onClick={() => setShowContractSnapshot((v) => !v)}
+              style={{
+                ...btnBase,
+                background: "rgba(11,18,32,0.85)",
+                color: "#e5e7eb",
+                cursor: "pointer",
+              }}
+              title="Show or hide Contract Snapshot details"
+            >
+              {showContractSnapshot ? "Hide" : "Show"}
+            </button>
+            <button
+              onClick={() => onCopyMarkdown(String(requestId))}
+              style={{
+                ...btnBase,
+                background: "rgba(11,18,32,0.85)",
+                color: "#e5e7eb",
+                cursor: "pointer",
+              }}
+              title="Copy request ID"
+            >
+              Copy Request ID
+            </button>
+            <button
+              onClick={() => onCopyMarkdown(String(cacheKey))}
+              style={{
+                ...btnBase,
+                background: "rgba(11,18,32,0.85)",
+                color: "#e5e7eb",
+                cursor: "pointer",
+              }}
+              title="Copy cache key"
+            >
+              Copy Cache Key
+            </button>
+          </div>
+        </div>
+
+        {showContractSnapshot && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
             <span style={{ ...pillStyle }} title="raw.meta.latency_ms">
               Latency:{" "}
               <span style={{ color: "white", fontWeight: 900 }}>{latencyMs ?? "—"}</span> ms
@@ -1025,11 +1160,50 @@ const NarrativeDashboard = () => {
               team_trends:{" "}
               <span style={{ color: "white", fontWeight: 900 }}>{scTeamTrends ?? "—"}</span>
             </span>
+
+            <span style={{ ...pillStyle }} title="raw.meta.source_counts.player_props">
+              player_props:{" "}
+              <span style={{ color: "white", fontWeight: 900 }}>{scPlayerProps ?? "—"}</span>
+            </span>
+
+            <span style={{ ...pillStyle }} title="raw.meta.source_counts.odds_games">
+              odds_games:{" "}
+              <span style={{ color: "white", fontWeight: 900 }}>{scOddsGames ?? "—"}</span>
+            </span>
           </div>
-        </div>
+        )}
+
+        {showContractSnapshot && sourceStatusEntries.length > 0 && (
+          <div
+            style={{
+              marginTop: 12,
+              border: "1px dashed #334155",
+              borderRadius: 12,
+              padding: 12,
+              background: "rgba(0,0,0,0.12)",
+            }}
+          >
+            <div style={{ fontSize: 12, fontWeight: 900, color: "#cbd5e1", marginBottom: 8 }}>
+              Source Status
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {sourceStatusEntries.map(([key, value]) => {
+                const status = String(value?.status || "no_data");
+                const count = Number.isFinite(Number(value?.count)) ? Number(value?.count) : 0;
+                const err = String(value?.error || "").trim();
+                const style = SOURCE_STATUS_STYLES[status] || SOURCE_STATUS_STYLES.no_data;
+                return (
+                  <span key={key} style={{ ...pillStyle, ...style }} title={err || `${SOURCE_LABELS[key]} status`}>
+                    {SOURCE_LABELS[key]}: {status} ({count})
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Phase 4: Enhanced Soft Errors Display */}
-        {Object.keys(softErrors).length > 0 && (
+        {showContractSnapshot && softErrorEntries.length > 0 && (
           <div
             style={{
               marginTop: 12,
@@ -1041,58 +1215,36 @@ const NarrativeDashboard = () => {
               background: "rgba(251, 191, 36, 0.08)",
             }}
           >
-            <div style={{ fontWeight: 900, color: "#fbbf24", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-              ⚠️ Soft Errors Detected
+            <div style={{ fontWeight: 900, color: "#fbbf24", marginBottom: 8, display: "flex", alignItems: "center", gap: 6, justifyContent: "space-between" }}>
+              <span>⚠️ Soft Errors Detected ({softErrorEntries.length})</span>
+              <button
+                onClick={() => onCopyMarkdown(JSON.stringify(softErrors, null, 2))}
+                style={{
+                  ...btnBase,
+                  padding: "6px 10px",
+                  background: "rgba(251,191,36,0.15)",
+                  color: "#fde68a",
+                  border: "1px solid rgba(251,191,36,0.4)",
+                  cursor: "pointer",
+                }}
+                title="Copy raw.meta.soft_errors JSON"
+              >
+                Copy soft_errors
+              </button>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {softErrors.ai && (
-                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
-                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>🤖 AI:</span>
-                  <span>{String(softErrors.ai)}</span>
+              {softErrorEntries.map(([key, value]) => (
+                <div key={key} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>{SOFT_ERROR_LABELS[key]}:</span>
+                  <span>{String(value)}</span>
                 </div>
-              )}
-              {softErrors.trends && (
-                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
-                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>📈 Trends:</span>
-                  <span>{String(softErrors.trends)}</span>
-                </div>
-              )}
-              {softErrors.odds && (
-                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
-                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>🎲 Odds:</span>
-                  <span>{String(softErrors.odds)}</span>
-                </div>
-              )}
-              {softErrors.games_today && (
-                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
-                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>🏀 Games:</span>
-                  <span>{String(softErrors.games_today)}</span>
-                </div>
-              )}
-              {softErrors.player_props && (
-                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
-                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>👤 Player Props:</span>
-                  <span>{String(softErrors.player_props)}</span>
-                </div>
-              )}
-              {softErrors.markdown && (
-                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
-                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>📝 Markdown:</span>
-                  <span>{String(softErrors.markdown)}</span>
-                </div>
-              )}
-              {softErrors.template && (
-                <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
-                  <span style={{ color: "#fbbf24", fontWeight: 800 }}>📄 Template:</span>
-                  <span>{String(softErrors.template)}</span>
-                </div>
-              )}
+              ))}
             </div>
           </div>
         )}
 
         {/* Phase 4: Cache Status Indicator */}
-        {cacheUsed !== undefined && (
+        {showContractSnapshot && cacheUsed !== undefined && (
           <div
             style={{
               marginTop: 12,
@@ -1122,6 +1274,7 @@ const NarrativeDashboard = () => {
         )}
 
         {/* Phase 4: Contract Version & Request ID */}
+        {showContractSnapshot && (
         <div
           style={{
             marginTop: 12,
@@ -1141,23 +1294,24 @@ const NarrativeDashboard = () => {
             <span style={{ fontWeight: 700, color: "#cbd5e1", fontFamily: "monospace" }}>{requestId}</span>
           </div>
         </div>
+        )}
       </div>
 
       {/* Trends Preview */}
       <div
         style={{
-          marginBottom: 16,
+          marginBottom: isMobile ? 12 : 16,
           border: "1px solid #334155",
           background: "rgba(17,24,39,0.55)",
           borderRadius: 14,
-          padding: 14,
+          padding: cardPad,
         }}
       >
         <div
           style={{
             display: "flex",
             justifyContent: "space-between",
-            gap: 10,
+            gap: sectionGap,
             alignItems: "center",
             flexWrap: "wrap",
             marginBottom: 10,
@@ -1171,6 +1325,18 @@ const NarrativeDashboard = () => {
           </div>
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              onClick={() => setShowTrendsPreview((v) => !v)}
+              style={{
+                ...btnBase,
+                background: "rgba(11,18,32,0.85)",
+                color: "#e5e7eb",
+                cursor: "pointer",
+              }}
+              title="Show or hide Trends Preview details"
+            >
+              {showTrendsPreview ? "Hide" : "Show"}
+            </button>
             <span style={{ ...pillStyle }}>
               Player trends:{" "}
               <span style={{ color: "white", fontWeight: 900 }}>{playerTrendsCount}</span>
@@ -1195,7 +1361,7 @@ const NarrativeDashboard = () => {
           </div>
         </div>
 
-        {!backendTrendsEnabled ? (
+        {showTrendsPreview && !backendTrendsEnabled ? (
           <div
             style={{
               fontSize: 12,
@@ -1219,8 +1385,8 @@ const NarrativeDashboard = () => {
               </div>
             ) : null}
           </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        ) : showTrendsPreview ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 10 : 12 }}>
             {/* Player trends list */}
             <div>
               <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 6 }}>
@@ -1228,7 +1394,7 @@ const NarrativeDashboard = () => {
               </div>
 
               {playerTrendsTop.length ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 6 : 8 }}>
                   {playerTrendsTop.map((t, idx) => {
                     const f = extractPlayerTrendFields(t);
                     const dir = normalizeDirection(f.direction);
@@ -1240,18 +1406,18 @@ const NarrativeDashboard = () => {
                         style={{
                           display: "flex",
                           justifyContent: "space-between",
-                          gap: 10,
+                          gap: isMobile ? 8 : 10,
                           alignItems: "center",
                           border: "1px solid #334155",
                           background: "rgba(0,0,0,0.18)",
                           borderRadius: 12,
-                          padding: "10px 12px",
+                          padding: trendsRowPad,
                           flexWrap: "wrap",
                         }}
                       >
-                        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                          <div style={{ fontSize: 13, fontWeight: 900 }}>{String(f.player)}</div>
-                          <div style={{ fontSize: 12, color: "#9ca3af" }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 2 : 3 }}>
+                          <div style={{ fontSize: trendsTitleSize, fontWeight: 900 }}>{String(f.player)}</div>
+                          <div style={{ fontSize: trendsMetaSize, color: "#9ca3af" }}>
                             Stat:{" "}
                             <span style={{ color: "#e5e7eb", fontWeight: 800 }}>
                               {String(f.stat)}
@@ -1267,8 +1433,8 @@ const NarrativeDashboard = () => {
 
                         <span
                           style={{
-                            fontSize: 12,
-                            padding: "5px 10px",
+                            fontSize: trendsMetaSize,
+                            padding: trendsBadgePad,
                             borderRadius: 999,
                             fontWeight: 900,
                             ...trendDirBadgeStyle(dir),
@@ -1294,7 +1460,7 @@ const NarrativeDashboard = () => {
               </div>
 
               {teamTrendsTop.length ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 6 : 8 }}>
                   {teamTrendsTop.map((t, idx) => {
                     const f = extractTeamTrendFields(t);
                     const dir = normalizeDirection(f.direction);
@@ -1306,18 +1472,18 @@ const NarrativeDashboard = () => {
                         style={{
                           display: "flex",
                           justifyContent: "space-between",
-                          gap: 10,
+                          gap: isMobile ? 8 : 10,
                           alignItems: "center",
                           border: "1px solid #334155",
                           background: "rgba(0,0,0,0.18)",
                           borderRadius: 12,
-                          padding: "10px 12px",
+                          padding: trendsRowPad,
                           flexWrap: "wrap",
                         }}
                       >
-                        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                          <div style={{ fontSize: 13, fontWeight: 900 }}>{String(f.team)}</div>
-                          <div style={{ fontSize: 12, color: "#9ca3af" }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 2 : 3 }}>
+                          <div style={{ fontSize: trendsTitleSize, fontWeight: 900 }}>{String(f.team)}</div>
+                          <div style={{ fontSize: trendsMetaSize, color: "#9ca3af" }}>
                             Stat:{" "}
                             <span style={{ color: "#e5e7eb", fontWeight: 800 }}>
                               {String(f.stat)}
@@ -1333,8 +1499,8 @@ const NarrativeDashboard = () => {
 
                         <span
                           style={{
-                            fontSize: 12,
-                            padding: "5px 10px",
+                            fontSize: trendsMetaSize,
+                            padding: trendsBadgePad,
                             borderRadius: 999,
                             fontWeight: 900,
                             ...trendDirBadgeStyle(dir),
@@ -1368,7 +1534,7 @@ const NarrativeDashboard = () => {
               </div>
             ) : null}
           </div>
-        )}
+        ) : null}
       </div>
 
       {/* Metadata */}

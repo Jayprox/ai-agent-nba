@@ -72,6 +72,31 @@ def _install_common_stubs(monkeypatch, *, ai_allowed: bool = True):
     )
 
     # -----------------------------
+    # Stub: player props
+    # -----------------------------
+    def fake_fetch_player_props_for_today(*args, **kwargs):
+        return [
+            {
+                "event_id": "evt_1",
+                "matchup": "Away Team @ Home Team",
+                "player_name": "LeBron James",
+                "market": "player_points",
+                "selection": "Over",
+                "line": 25.5,
+                "price": 1.9,
+                "bookmaker": "draftkings",
+                "commence_time": "2025-12-17T17:00:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(
+        narrative_route,
+        "fetch_player_props_for_today",
+        fake_fetch_player_props_for_today,
+        raising=False,
+    )
+
+    # -----------------------------
     # Stub: API-Basketball games (awaitable in the route)
     # -----------------------------
     async def fake_get_today_games(*args, **kwargs):
@@ -201,11 +226,40 @@ def test_narrative_markdown_contract(monkeypatch, mode: str):
     # Odds contract (dict + games list)
     assert isinstance(raw.get("odds"), dict)
     assert isinstance(raw["odds"].get("games", []), list)
+    assert isinstance(raw.get("player_props"), list)
+    assert len(raw.get("player_props", [])) >= 1
+    assert "player_props" not in meta.get("soft_errors", {})
 
     # Markdown sanity
     md = data["markdown"]
     assert "**NBA Narrative**" in md
     assert "Macro Summary" in md
+
+
+def test_template_mode_uses_grounded_summary(monkeypatch):
+    """
+    Template mode should produce a grounded deterministic summary
+    (not the generic fallback copy path).
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+
+    client = TestClient(app)
+    res = client.get("/nba/narrative/markdown?mode=template&cache_ttl=0&trends=1")
+    assert res.status_code == 200
+
+    data = res.json()
+    assert data.get("ok") is True, data
+    summary = data.get("summary") or {}
+    assert isinstance(summary, dict)
+
+    meta = summary.get("metadata") or {}
+    assert isinstance(meta, dict)
+    assert meta.get("model") == "TEMPLATE_GROUNDED_V1"
+
+    macro = summary.get("macro_summary") or []
+    if isinstance(macro, str):
+        macro = [macro]
+    assert any("Data coverage:" in str(line) for line in macro)
 
 
 @pytest.mark.parametrize(
@@ -576,6 +630,35 @@ def test_contract_version_present(monkeypatch):
     
     # Should be "2.7" or similar
     assert "2.7" in meta["contract_version"] or meta["contract_version"] == "2.7"
+
+
+def test_source_status_present_and_shaped(monkeypatch):
+    """
+    Observability metadata: raw.meta.source_status should exist and contain
+    per-source status/count/error keys.
+    """
+    _install_common_stubs(monkeypatch, ai_allowed=True)
+
+    client = TestClient(app)
+    res = client.get("/nba/narrative/markdown?mode=ai&cache_ttl=0&trends=1")
+    assert res.status_code == 200
+    data = res.json()
+    assert data.get("ok") is True
+
+    meta = (data.get("raw") or {}).get("meta") or {}
+    source_status = meta.get("source_status") or {}
+    assert isinstance(source_status, dict)
+
+    expected_sources = {"games_today", "odds", "trends", "player_props"}
+    assert expected_sources.issubset(set(source_status.keys()))
+
+    allowed_status = {"ok", "no_data", "error", "disabled"}
+    for source in expected_sources:
+        entry = source_status.get(source) or {}
+        assert isinstance(entry, dict)
+        assert entry.get("status") in allowed_status
+        assert isinstance(entry.get("count"), int)
+        assert isinstance(entry.get("error"), str)
 
 
 def test_soft_errors_only_allowed_keys(monkeypatch):
