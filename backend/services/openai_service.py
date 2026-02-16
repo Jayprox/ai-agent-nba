@@ -78,6 +78,25 @@ def _build_slate_grounding(games_today: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_data_coverage_block(data: Dict[str, Any]) -> str:
+    """
+    Compact input coverage summary so the model can explicitly handle sparse data.
+    """
+    games_today = data.get("games_today") or []
+    odds_games = (data.get("odds") or {}).get("games", []) or []
+    player_trends = data.get("player_trends") or []
+    team_trends = data.get("team_trends") or []
+    player_props = data.get("player_props") or []
+    return (
+        "Input coverage snapshot:\n"
+        f"- games_today_count: {len(games_today)}\n"
+        f"- odds_games_count: {len(odds_games)}\n"
+        f"- player_trends_count: {len(player_trends)}\n"
+        f"- team_trends_count: {len(team_trends)}\n"
+        f"- player_props_count: {len(player_props)}"
+    )
+
+
 def _try_parse_json(text: str) -> Dict[str, Any]:
     """
     Robust JSON parsing:
@@ -175,35 +194,52 @@ def generate_narrative_summary(data: dict, mode: str = "ai") -> dict:
 
     games_today = data.get("games_today") or []
     slate_block = _build_slate_grounding(games_today)
+    coverage_block = _build_data_coverage_block(data)
     input_json = _safe_json_dumps(data)
 
     system_rules = (
         "You are an expert NBA analyst producing a schedule-grounded narrative.\n"
         "Rules:\n"
         "1) Use ONLY the provided inputs.\n"
-        "2) Do NOT invent injuries, betting lines, rumors, or player statistics.\n"
-        "3) If something is not present in the input JSON, explicitly say it is not available.\n"
-        "4) Ground analysis primarily in the slate: matchups, venues, times, timezone, and game status.\n"
-        "5) Output MUST be valid JSON ONLY (no markdown, no code fences).\n"
+        "2) Do NOT invent injuries, betting lines, rumors, player statistics, or outcomes.\n"
+        "3) If a source is absent/sparse, explicitly state that limitation in the narrative.\n"
+        "4) Ground analysis in concrete available data: matchups, schedule status, trends, odds, and props coverage.\n"
+        "5) Keep tone concise and decision-useful; avoid generic filler.\n"
+        "6) Output MUST be valid JSON ONLY (no markdown, no code fences).\n"
     )
 
     schema = {
-        "macro_summary": "string (2–6 sentences; reference at least 2 real matchups from the slate)",
+        "macro_summary": (
+            "string (3-6 sentences). Structure: "
+            "(a) slate overview, (b) strongest available signals, (c) explicit missing-data limitations."
+        ),
         "micro_summary": {
             "key_edges": [
-                {"value_label": "string", "edge_score": "number 0-10", "text": "string"}
+                {
+                    "value_label": "string (e.g., Market Context / Trend Signal / Props Availability)",
+                    "edge_score": "number 0-10",
+                    "text": "string (1 sentence, grounded in specific provided input)",
+                }
             ],
             "risk_score": "number 0.0-1.0",
-            "risk_rationale": "string (1 sentence explaining what limits confidence)",
+            "risk_rationale": "string (1 sentence naming concrete limitations from the input)",
         },
-        "analyst_takeaway": "string (2–4 sentences; conservative and actionable)",
+        "analyst_takeaway": (
+            "string (2-4 sentences): "
+            "prioritize where data is strongest, and caution where data is missing."
+        ),
         "confidence_summary": ["string"],
         "metadata": {"model": "string"},
     }
 
     user_prompt = (
         f"{slate_block}\n\n"
+        f"{coverage_block}\n\n"
         "Generate an NBA slate narrative.\n\n"
+        "Quality requirements:\n"
+        "- Be explicit about what is known vs unavailable.\n"
+        "- Prefer short, concrete statements tied to provided inputs.\n"
+        "- Keep key_edges focused on the most actionable 2-5 signals.\n\n"
         "Return JSON matching this schema exactly:\n"
         f"{_safe_json_dumps(schema)}\n\n"
         "INPUT JSON:\n"

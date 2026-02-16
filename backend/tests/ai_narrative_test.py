@@ -65,6 +65,25 @@ def _install_offline_stubs(monkeypatch):
         raising=False,
     )
 
+    # Stub player props fetch
+    monkeypatch.setattr(
+        narrative_route,
+        "fetch_player_props_for_today",
+        lambda *args, **kwargs: [
+            {
+                "event_id": "evt_1",
+                "matchup": "Away Team @ Home Team",
+                "player_name": "LeBron James",
+                "market": "player_points",
+                "selection": "Over",
+                "line": 25.5,
+                "price": 1.9,
+                "bookmaker": "draftkings",
+            }
+        ],
+        raising=False,
+    )
+
     # Stub API-Basketball games
     async def fake_get_today_games(*args, **kwargs):
         return [

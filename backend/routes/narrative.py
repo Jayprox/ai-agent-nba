@@ -17,6 +17,7 @@ from fastapi import APIRouter, Query, Request
 # --- Internal imports ---
 from agents.odds_agent.models import OddsResponse
 from common.odds_utils import fetch_moneyline_odds
+from common.player_props_utils import fetch_player_props_for_today
 from services.api_basketball_service import get_today_games
 from services.openai_service import generate_narrative_summary
 
@@ -168,6 +169,53 @@ def _sanitize_soft_errors(soft_errors: Dict[str, Any]) -> Dict[str, str]:
     return sanitized
 
 
+def _build_source_status(
+    *,
+    games_count: int,
+    games_err: Optional[str],
+    odds_count: int,
+    odds_err: Optional[str],
+    player_trends_count: int,
+    team_trends_count: int,
+    trends_err: Optional[str],
+    trends_enabled: bool,
+    player_props_count: int,
+    player_props_err: Optional[str],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Build compact per-source status metadata for observability.
+    """
+    trends_count = player_trends_count + team_trends_count
+    trends_status = "ok"
+    if trends_err:
+        trends_status = "disabled" if not trends_enabled else "error"
+    elif trends_count == 0:
+        trends_status = "no_data"
+
+    return {
+        "games_today": {
+            "status": "error" if games_err else ("ok" if games_count > 0 else "no_data"),
+            "count": games_count,
+            "error": games_err or "",
+        },
+        "odds": {
+            "status": "error" if odds_err else ("ok" if odds_count > 0 else "no_data"),
+            "count": odds_count,
+            "error": odds_err or "",
+        },
+        "trends": {
+            "status": trends_status,
+            "count": trends_count,
+            "error": trends_err or "",
+        },
+        "player_props": {
+            "status": "error" if player_props_err else ("ok" if player_props_count > 0 else "no_data"),
+            "count": player_props_count,
+            "error": player_props_err or "",
+        },
+    }
+
+
 def _sha1_digest(obj: Any) -> str:
     """
     Deterministic digest of key inputs for debugging/traceability.
@@ -293,6 +341,138 @@ def _fallback_summary(reason: str) -> Dict[str, Any]:
     }
 
 
+def _extract_teams_from_game(game: Dict[str, Any]) -> Tuple[str, str]:
+    away = (
+        ((game.get("away_team") or {}).get("name"))
+        or ((game.get("teams") or {}).get("away") or {}).get("name")
+        or game.get("away_team")
+        or "Away"
+    )
+    home = (
+        ((game.get("home_team") or {}).get("name"))
+        or ((game.get("teams") or {}).get("home") or {}).get("name")
+        or game.get("home_team")
+        or "Home"
+    )
+    return str(away), str(home)
+
+
+def _build_grounded_template_summary(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build a grounded non-AI narrative for template mode.
+    Uses only fetched inputs; never invents stats or injuries.
+    """
+    games = data.get("games_today", []) or []
+    odds_games = (data.get("odds") or {}).get("games", []) or []
+    player_trends = data.get("player_trends", []) or []
+    team_trends = data.get("team_trends", []) or []
+    player_props = data.get("player_props", []) or []
+
+    macro_lines = []
+    if games:
+        macro_lines.append(f"Slate overview: {len(games)} NBA game(s) were returned for the current window.")
+        sample_matchups = []
+        for g in games[:3]:
+            away, home = _extract_teams_from_game(g)
+            status = (g.get("status") or {}).get("short") or (g.get("status") or {}).get("long") or "Scheduled"
+            sample_matchups.append(f"{away} @ {home} ({status})")
+        macro_lines.append("Sample matchups: " + "; ".join(sample_matchups) + ".")
+    else:
+        macro_lines.append("Slate overview: no games were returned for the current window.")
+
+    macro_lines.append(
+        "Data coverage: "
+        f"odds_games={len(odds_games)}, "
+        f"player_trends={len(player_trends)}, "
+        f"team_trends={len(team_trends)}, "
+        f"player_props={len(player_props)}."
+    )
+
+    key_edges = []
+    for g in odds_games[:3]:
+        away = g.get("away_team") or "Away"
+        home = g.get("home_team") or "Home"
+        ml = g.get("moneyline") or {}
+        away_a = (ml.get("away") or {}).get("american")
+        home_a = (ml.get("home") or {}).get("american")
+        if away_a is not None and home_a is not None:
+            text = f"{away} @ {home}: moneyline context shows away {away_a} and home {home_a}."
+        else:
+            text = f"{away} @ {home}: moneyline context available with partial pricing detail."
+        key_edges.append({"value_label": "Market Context", "edge_score": 5.0, "text": text})
+
+    for t in player_trends[:2]:
+        player = t.get("player_name") or "Player"
+        stat = t.get("stat_type") or "stat"
+        avg = t.get("average")
+        direction = t.get("trend_direction") or "neutral"
+        avg_txt = f"{avg}" if avg is not None else "n/a"
+        key_edges.append(
+            {
+                "value_label": "Trend Signal",
+                "edge_score": 5.5,
+                "text": f"{player} {stat} trend is {direction} with average={avg_txt}.",
+            }
+        )
+
+    for p in player_props[:2]:
+        player = p.get("player_name") or "Player"
+        market = p.get("market") or "player market"
+        line = p.get("line")
+        line_txt = f"{line}" if line is not None else "n/a"
+        key_edges.append(
+            {
+                "value_label": "Props Availability",
+                "edge_score": 5.0,
+                "text": f"{player} has {market} posted with line={line_txt}.",
+            }
+        )
+
+    missing_sources = []
+    if not games:
+        missing_sources.append("games_today")
+    if not odds_games:
+        missing_sources.append("odds")
+    if not player_trends:
+        missing_sources.append("player_trends")
+    if not player_props:
+        missing_sources.append("player_props")
+
+    risk_score = min(0.95, round(0.35 + (0.12 * len(missing_sources)), 2))
+    if missing_sources:
+        risk_rationale = "Higher uncertainty due to limited inputs: " + ", ".join(missing_sources) + "."
+    else:
+        risk_rationale = "Core inputs were available; uncertainty remains because this is a template-mode summary."
+
+    if risk_score <= 0.45:
+        confidence = "High"
+    elif risk_score <= 0.65:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
+    analyst_takeaway = (
+        "Use this summary as a grounded slate snapshot. "
+        "Prioritize matchups with both odds and trend signals, and treat games without those inputs as lower-conviction."
+    )
+
+    return {
+        "macro_summary": macro_lines,
+        "micro_summary": {
+            "key_edges": key_edges[:6],
+            "risk_score": risk_score,
+            "risk_rationale": risk_rationale,
+        },
+        "analyst_takeaway": analyst_takeaway,
+        "confidence_summary": [confidence],
+        "metadata": {
+            "model": "TEMPLATE_GROUNDED_V1",
+            "ai_used": False,
+            "ai_error": "mode=template (AI not requested).",
+        },
+    }
+
+
 def _validate_or_fallback(
     *,
     candidate: Any,
@@ -352,38 +532,59 @@ def _render_markdown(summary: Dict[str, Any], compact: bool = False) -> str:
     analyst = summary.get("analyst_takeaway")
     plain = summary.get("summary")
 
+    confidence = summary.get("confidence_summary", [])
+    if not isinstance(confidence, list):
+        confidence = [confidence] if confidence else []
+    confidence_text = ", ".join([str(c).strip() for c in confidence if str(c).strip()])
+
     lines = [f"**NBA Narrative**  \n_Generated: {gen_at} • Model: {model}_"]
 
     if macro:
-        macro_text = "\n\n".join(macro) if isinstance(macro, list) else str(macro)
+        if isinstance(macro, list):
+            macro_items = [str(m).strip() for m in macro if str(m).strip()]
+            macro_text = "\n".join([f"- {m}" for m in macro_items]) if macro_items else ""
+        else:
+            macro_text = str(macro).strip()
         lines.append("\n### Macro Summary")
-        lines.append(macro_text.strip())
+        lines.append(macro_text)
 
     if edges and not compact:
         lines.append("\n### Key Edges")
-        for e in edges:
+        for idx, e in enumerate(edges, start=1):
             if isinstance(e, dict):
                 lbl = e.get("value_label", "")
                 score = e.get("edge_score", "")
                 t = e.get("text", "")
                 if lbl or score or t:
-                    lines.append(f"- **{lbl}** (score: {score}): {t}")
+                    lines.append(f"{idx}. **{lbl}** (score: {score})")
+                    lines.append(f"   {t}")
                 else:
-                    lines.append(f"- {json.dumps(e)}")
+                    lines.append(f"{idx}. {json.dumps(e)}")
             elif isinstance(e, str):
-                lines.append(f"- {e}")
+                lines.append(f"{idx}. {e}")
             else:
-                lines.append(f"- {str(e)}")
+                lines.append(f"{idx}. {str(e)}")
 
     if risk is not None and not compact:
+        lines.append("\n### Risk & Confidence")
         if risk_rationale:
-            lines.append(f"\n**Risk Score:** {risk}  \n_{risk_rationale}_")
+            lines.append(f"- **Risk Score:** {risk}")
+            lines.append(f"- **Risk Rationale:** {risk_rationale}")
         else:
-            lines.append(f"\n**Risk Score:** {risk}")
+            lines.append(f"- **Risk Score:** {risk}")
+        if confidence_text:
+            lines.append(f"- **Confidence:** {confidence_text}")
 
     if analyst:
         lines.append("\n### Analyst Takeaway")
-        lines.append(str(analyst).strip())
+        analyst_text = str(analyst).strip()
+        if ". " in analyst_text:
+            sentences = [s.strip() for s in analyst_text.split(". ") if s.strip()]
+            for s in sentences:
+                suffix = "" if s.endswith(".") else "."
+                lines.append(f"- {s}{suffix}")
+        else:
+            lines.append(analyst_text)
 
     if not macro and plain:
         lines.append("\n### Summary")
@@ -534,14 +735,17 @@ async def get_daily_narrative(
                 pass
             return payload
 
-        # --- Parallel data fetches (games + odds, trends optional) ---
+        # --- Parallel data fetches (games + odds + player props, trends optional) ---
         t_fetch_start = time.perf_counter()
         games_task = _safe_await("games_today", get_today_games())
         odds_task = _safe_call("odds", fetch_moneyline_odds)
+        player_props_task = _safe_call("player_props", fetch_player_props_for_today)
 
         trends_task = None
         trends_err: Optional[str] = None
         trends_data = None
+        player_props_data = []
+        player_props_err: Optional[str] = None
 
         if effective_trends:
             if get_trends_summary is None:
@@ -551,11 +755,23 @@ async def get_daily_narrative(
         else:
             trends_err = "Disabled (trends=0 override or ENABLE_TRENDS_IN_NARRATIVE=0)."
 
+        tasks = {
+            "games": games_task,
+            "odds": odds_task,
+            "player_props": player_props_task,
+        }
         if trends_task is not None:
-            (games, odds, trends_res) = await asyncio.gather(games_task, odds_task, trends_task)
-            trends_data, trends_err = trends_res
-        else:
-            (games, odds) = await asyncio.gather(games_task, odds_task)
+            tasks["trends"] = trends_task
+
+        task_keys = list(tasks.keys())
+        task_results = await asyncio.gather(*tasks.values())
+        results_by_key = dict(zip(task_keys, task_results))
+
+        games = results_by_key["games"]
+        odds = results_by_key["odds"]
+        player_props_data, player_props_err = results_by_key["player_props"]
+        if "trends" in results_by_key:
+            trends_data, trends_err = results_by_key["trends"]
 
         t_fetch_ms = (time.perf_counter() - t_fetch_start) * 1000
 
@@ -579,6 +795,13 @@ async def get_daily_narrative(
             success=not bool(odds_err),
             error=odds_err
         )
+        _log_data_fetch(
+            request_id=request_id,
+            source="player_props",
+            success=not bool(player_props_err),
+            error=player_props_err,
+            count=len(player_props_data or [])
+        )
 
         if games_err:
             soft_errors["games_today"] = games_err
@@ -586,6 +809,8 @@ async def get_daily_narrative(
             soft_errors["odds"] = odds_err
         if trends_err:
             soft_errors["trends"] = trends_err
+        if player_props_err:
+            soft_errors["player_props"] = player_props_err
 
         # Step 2.8: Log trends status
         _log_trends_status(
@@ -594,9 +819,6 @@ async def get_daily_narrative(
             override=override,
             error=trends_err
         )
-
-        # Explicitly mark player props as backlogged / disabled for now
-        soft_errors["player_props"] = "Live player props integration temporarily disabled (backlog)."
 
         # Trends unpacking
         team_trends, player_trends = [], []
@@ -609,7 +831,7 @@ async def get_daily_narrative(
             "games_today": games_today or [],
             "player_trends": [p.model_dump() for p in player_trends] if player_trends else [],
             "team_trends": [t.model_dump() for t in team_trends] if team_trends else [],
-            "player_props": [],
+            "player_props": player_props_data or [],
             "odds": odds_data.model_dump() if isinstance(odds_data, OddsResponse) else odds_data,
         }
 
@@ -633,9 +855,14 @@ async def get_daily_narrative(
         else:
             t_ai_start = time.perf_counter()
             try:
-                # Call the generator with the requested mode.
-                summary_obj = generate_narrative_summary(narrative_data, mode=requested_mode)
-                ai_used = bool(ai_requested)  # only counts as used if mode=ai AND we got a usable result
+                if ai_requested:
+                    # AI mode: use OpenAI-backed generator with route-level soft-fallbacks.
+                    summary_obj = generate_narrative_summary(narrative_data, mode=requested_mode)
+                    ai_used = True
+                else:
+                    # Template mode: build a grounded deterministic summary from available inputs.
+                    summary_obj = _build_grounded_template_summary(narrative_data)
+                    ai_used = False
                 t_ai_ms = (time.perf_counter() - t_ai_start) * 1000
                 logger.debug(f"narrative.ai_generation | request_id={request_id} | ai_latency_ms={t_ai_ms:.2f}")
             except Exception as e:
@@ -681,6 +908,26 @@ async def get_daily_narrative(
 
         total_latency_ms = (time.perf_counter() - t0) * 1000
 
+        source_counts = {
+            "games_today": len(narrative_data.get("games_today", []) or []),
+            "player_trends": len(narrative_data.get("player_trends", [])),
+            "team_trends": len(narrative_data.get("team_trends", [])),
+            "player_props": len(narrative_data.get("player_props", [])),
+            "odds_games": len((narrative_data.get("odds") or {}).get("games", []) or []),
+        }
+        source_status = _build_source_status(
+            games_count=source_counts["games_today"],
+            games_err=games_err,
+            odds_count=source_counts["odds_games"],
+            odds_err=odds_err,
+            player_trends_count=source_counts["player_trends"],
+            team_trends_count=source_counts["team_trends"],
+            trends_err=trends_err,
+            trends_enabled=bool(effective_trends),
+            player_props_count=source_counts["player_props"],
+            player_props_err=player_props_err,
+        )
+
         resp: Dict[str, Any] = {
             "ok": True,
             "summary": summary,
@@ -694,13 +941,8 @@ async def get_daily_narrative(
                         "fetch_ms": round(t_fetch_ms, 2),
                         "total_ms": round(total_latency_ms, 2),
                     },
-                    "source_counts": {
-                        "games_today": len(narrative_data.get("games_today", []) or []),
-                        "player_trends": len(narrative_data.get("player_trends", [])),
-                        "team_trends": len(narrative_data.get("team_trends", [])),
-                        "player_props": len(narrative_data.get("player_props", [])),
-                        "odds_games": len((narrative_data.get("odds") or {}).get("games", []) or []),
-                    },
+                    "source_counts": source_counts,
+                    "source_status": source_status,
                     "cache_used": False,
                     "cache_ttl_s": ttl,
                     "cache_key": cache_key,
