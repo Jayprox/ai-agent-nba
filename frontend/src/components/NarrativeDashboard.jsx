@@ -657,6 +657,47 @@ const NarrativeDashboard = () => {
   const sourceStatusEntries = Object.entries(sourceStatus).filter(
     ([key]) => SOURCE_LABELS[key]
   );
+  const sourceStatusSummary = sourceStatusEntries.reduce(
+    (acc, [, value]) => {
+      const status = String(value?.status || "no_data");
+      if (status === "ok") acc.ok += 1;
+      else if (status === "error") acc.error += 1;
+      else if (status === "disabled") acc.disabled += 1;
+      else acc.noData += 1;
+      return acc;
+    },
+    { ok: 0, error: 0, disabled: 0, noData: 0 }
+  );
+  const diagnosticsLevel =
+    softErrorEntries.length > 0 || sourceStatusSummary.error > 0
+      ? "attention"
+      : sourceStatusSummary.noData > 0 || sourceStatusSummary.disabled > 0
+      ? "partial"
+      : "healthy";
+  const diagnosticsLabel =
+    diagnosticsLevel === "attention"
+      ? "Attention"
+      : diagnosticsLevel === "partial"
+      ? "Partial Data"
+      : "Healthy";
+  const diagnosticsStyle =
+    diagnosticsLevel === "attention"
+      ? {
+          border: "1px solid rgba(239,68,68,0.35)",
+          background: "rgba(239,68,68,0.12)",
+          color: "#fecaca",
+        }
+      : diagnosticsLevel === "partial"
+      ? {
+          border: "1px solid rgba(251,191,36,0.35)",
+          background: "rgba(251,191,36,0.12)",
+          color: "#fde68a",
+        }
+      : {
+          border: "1px solid rgba(16,185,129,0.35)",
+          background: "rgba(16,185,129,0.12)",
+          color: "#bbf7d0",
+        };
   const contractVersion = displayRawMeta?.contract_version || "—";
   const requestId = displayRawMeta?.request_id || "—";
   const cacheExpiresInS = displayRawMeta?.cache_expires_in_s;
@@ -1124,8 +1165,59 @@ const NarrativeDashboard = () => {
             >
               Copy Cache Key
             </button>
+            <button
+              onClick={() =>
+                onCopyMarkdown(
+                  JSON.stringify(
+                    {
+                      request_id: requestId,
+                      cache_key: cacheKey,
+                      source_counts: sourceCounts,
+                      source_status: sourceStatus,
+                      soft_errors: softErrors,
+                    },
+                    null,
+                    2
+                  )
+                )
+              }
+              style={{
+                ...btnBase,
+                background: "rgba(11,18,32,0.85)",
+                color: "#e5e7eb",
+                cursor: "pointer",
+              }}
+              title="Copy core diagnostics snapshot"
+            >
+              Copy Diagnostics
+            </button>
           </div>
         </div>
+
+        {!showContractSnapshot && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
+            <span style={{ ...pillStyle, ...diagnosticsStyle }}>Status: {diagnosticsLabel}</span>
+            <span style={{ ...pillStyle }}>
+              Sources: ok {sourceStatusSummary.ok} • no_data {sourceStatusSummary.noData}
+              {sourceStatusSummary.disabled ? ` • disabled ${sourceStatusSummary.disabled}` : ""}
+              {sourceStatusSummary.error ? ` • error ${sourceStatusSummary.error}` : ""}
+            </span>
+            {softErrorEntries.length > 0 && (
+              <span style={{ ...pillStyle, border: "1px solid rgba(251,191,36,0.35)", color: "#fde68a" }}>
+                soft_errors: {softErrorEntries.length}
+              </span>
+            )}
+            <span style={{ ...pillStyle }}>
+              Latency: <span style={{ color: "white", fontWeight: 900 }}>{latencyMs ?? "—"}</span> ms
+            </span>
+            <span style={{ ...pillStyle }}>
+              Cache:{" "}
+              <span style={{ color: "white", fontWeight: 900 }}>
+                {cacheUsed === true ? "Used" : cacheUsed === false ? "No" : "—"}
+              </span>
+            </span>
+          </div>
+        )}
 
         {showContractSnapshot && (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
