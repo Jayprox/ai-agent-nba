@@ -24,7 +24,6 @@ from common.config_loader import (
     TZ,
 )
 from common.api_headers import get_json
-from services.api_basketball_service import get_today_games
 
 # ------------------------------------------------------------------------------
 # Config
@@ -104,17 +103,6 @@ def fetch_moneyline_odds(filter_date: Optional[str] = None, cache_ttl: int = _DE
         raw = get_json(_ODDS_URL, params)
     except Exception:
         return OddsResponse(date=date_out, games=games)
-
-    # Optional: fetch API-Basketball today games for richer metadata
-    try:
-        import asyncio
-        api_games = asyncio.run(get_today_games())
-        api_game_names = {
-            f"{g['teams']['home']['name']} vs {g['teams']['away']['name']}"
-            for g in api_games
-        }
-    except Exception:
-        api_game_names = set()
 
     for event in raw or []:
         sport_key = event.get("sport_key", "")

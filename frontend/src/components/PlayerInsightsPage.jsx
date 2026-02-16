@@ -9,7 +9,7 @@ const PlayerInsightsPage = () => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [useLive, setUseLive] = useState(false);
+  const [useLive, setUseLive] = useState(true);
 
   const fetchInsights = async () => {
     try {

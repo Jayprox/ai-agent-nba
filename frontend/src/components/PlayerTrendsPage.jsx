@@ -9,7 +9,7 @@ const PlayerTrendsPage = () => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [useLive, setUseLive] = useState(false); // 🔄 toggle live/mock
+  const [useLive, setUseLive] = useState(true); // default to live for current slate signals
 
   const fetchTrends = async () => {
     setLoading(true);

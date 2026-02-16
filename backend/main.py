@@ -89,13 +89,14 @@ app.add_middleware(
 # -------------------------------------------------
 # 📂 Import route modules after app is initialized
 # -------------------------------------------------
-from routes import nba_games_today, narrative  # noqa: E402
+from routes import nba_games_today, narrative, nba_stats  # noqa: E402
 
 # -------------------------------------------------
 # 🛤️ Register route modules
 # -------------------------------------------------
 app.include_router(nba_games_today.router)
 app.include_router(narrative.router)
+app.include_router(nba_stats.router)
 
 
 # -------------------------------------------------
