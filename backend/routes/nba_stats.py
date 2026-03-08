@@ -300,6 +300,7 @@ def _build_live_trends_payload() -> Dict[str, Any]:
             "variance": 0.0,
             "trend_direction": p.get("trend") or "neutral",
             "last_n_games": 1,
+            "matchup": p.get("matchup"),
         }
         for p in players
     ]
@@ -335,6 +336,42 @@ def _build_live_trends_payload() -> Dict[str, Any]:
             "count_player_trends": len(player_trends),
             "count_team_trends": len(team_trends),
         },
+    }
+
+
+def _filter_trends_by_team(payload: Dict[str, Any], team: str) -> Dict[str, Any]:
+    team_norm = str(team or "").strip().lower()
+    if not team_norm:
+        return payload
+
+    player_trends = payload.get("player_trends") or []
+    team_trends = payload.get("team_trends") or []
+
+    filtered_players = []
+    for p in player_trends:
+        matchup = str((p or {}).get("matchup") or "").lower()
+        if team_norm in matchup:
+            filtered_players.append(p)
+
+    filtered_teams = []
+    for t in team_trends:
+        team_name = str((t or {}).get("team_name") or "").lower()
+        if team_norm == team_name:
+            filtered_teams.append(t)
+
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    meta = {
+        **meta,
+        "filtered_for_team": team,
+        "count_player_trends": len(filtered_players),
+        "count_team_trends": len(filtered_teams),
+    }
+
+    return {
+        **payload,
+        "player_trends": filtered_players,
+        "team_trends": filtered_teams,
+        "meta": meta,
     }
 
 
@@ -508,10 +545,14 @@ async def trends() -> Dict[str, Any]:
 
 
 @router.get("/trends/live")
-async def trends_live() -> Dict[str, Any]:
+async def trends_live(team: Optional[str] = Query(None, description="Optional team name filter")) -> Dict[str, Any]:
     try:
         payload = _build_live_trends_payload()
+        payload = _filter_trends_by_team(payload, team or "")
         if payload.get("player_trends") or payload.get("team_trends"):
+            return payload
+        if team:
+            # Preserve team-scoped semantics: no matching rows should return empty, not global fallback data.
             return payload
         return await trends()
     except Exception:
