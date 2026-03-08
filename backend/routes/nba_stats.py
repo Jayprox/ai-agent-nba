@@ -338,6 +338,101 @@ def _build_live_trends_payload() -> Dict[str, Any]:
     }
 
 
+def _normalize_pick_type(value: str) -> str:
+    v = str(value or "").strip().lower()
+    allowed = {"straight", "smart_parlay", "lotto_parlay", "sleeper"}
+    return v if v in allowed else "straight"
+
+
+def _normalize_odds_band(value: str) -> str:
+    v = str(value or "").strip().lower()
+    allowed = {"minus_100_to_plus_500", "plus_100_to_plus_500", "plus_500_to_plus_1000", "plus_1000_plus"}
+    return v if v in allowed else "minus_100_to_plus_500"
+
+
+def _normalize_risk_profile(value: str) -> str:
+    v = str(value or "").strip().lower()
+    allowed = {"conservative", "standard", "aggressive"}
+    return v if v in allowed else "standard"
+
+
+def _risk_flag_text(source: str, entry: Dict[str, Any]) -> str:
+    status = str(entry.get("status") or "unknown")
+    if status in {"error", "disabled"}:
+        err = str(entry.get("error") or "").strip()
+        if err:
+            return f"{source}: {status} ({err})"
+        return f"{source}: {status}"
+    if status == "no_data":
+        return f"{source}: no_data"
+    return ""
+
+
+def _decision_from_quality(
+    *,
+    pick_type: str,
+    risk_profile: str,
+    source_counts: Dict[str, int],
+    source_status: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    missing = [k for k, v in source_status.items() if str(v.get("status")) in {"no_data", "error", "disabled"}]
+    negative_signals = len(missing)
+    strength = 0
+    if source_counts.get("odds_games", 0) > 0:
+        strength += 1
+    if source_counts.get("player_props", 0) > 0:
+        strength += 1
+    if source_counts.get("player_trends", 0) > 0 or source_counts.get("team_trends", 0) > 0:
+        strength += 1
+    if source_counts.get("games_today", 0) > 0:
+        strength += 1
+
+    decision = "pass"
+    if strength >= 3 and negative_signals <= 1:
+        decision = "bet"
+    elif strength >= 2 and negative_signals <= 2:
+        decision = "lean"
+
+    # Tighten for high-variance profiles
+    if pick_type == "lotto_parlay" and risk_profile != "aggressive" and decision == "bet":
+        decision = "lean"
+    if risk_profile == "conservative" and decision == "bet" and source_counts.get("odds_games", 0) < 3:
+        decision = "lean"
+
+    rationale: List[str] = [
+        f"Coverage snapshot: games={source_counts.get('games_today', 0)}, odds_games={source_counts.get('odds_games', 0)}, player_props={source_counts.get('player_props', 0)}, trends={source_counts.get('player_trends', 0) + source_counts.get('team_trends', 0)}.",
+    ]
+    if source_counts.get("odds_games", 0) == 0:
+        rationale.append("No current odds slate detected; price-based edge validation is limited.")
+    if source_counts.get("player_props", 0) == 0:
+        rationale.append("No live player props detected; player-angle confirmation is limited.")
+    if source_counts.get("games_today", 0) == 0:
+        rationale.append("No games returned for the active window; treat recommendations as low conviction.")
+    if decision == "bet":
+        rationale.append("Input coverage is broad enough for a decision-support bet candidate, not a guarantee.")
+    elif decision == "lean":
+        rationale.append("Inputs are mixed; lean only if line value remains favorable at placement time.")
+    else:
+        rationale.append("Insufficient or unstable inputs; best action is pass until stronger confirmation appears.")
+
+    flags: List[str] = []
+    for source, entry in source_status.items():
+        text = _risk_flag_text(source, entry)
+        if text:
+            flags.append(text)
+
+    if pick_type in {"smart_parlay", "lotto_parlay"}:
+        flags.append("Parlay correlation risk: avoid stacking strongly related legs.")
+    if pick_type == "lotto_parlay":
+        flags.append("High variance profile: expected hit rate is materially lower.")
+
+    return {
+        "recommendation": decision,
+        "rationale": rationale[:5],
+        "risk_flags": flags[:8],
+    }
+
+
 @router.get("/offense/teams")
 async def offense_teams() -> Dict[str, Any]:
     live_error = ""
@@ -502,3 +597,94 @@ async def player_insights_live() -> Dict[str, Any]:
         }
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"player_insights_live failed: {type(e).__name__}: {e}") from e
+
+
+@router.get("/picks/lab")
+async def picks_lab(
+    pick_type: str = Query("straight", description="straight | smart_parlay | lotto_parlay | sleeper"),
+    legs: int = Query(2, ge=1, le=12),
+    odds_band: str = Query("minus_100_to_plus_500", description="Odds range preset"),
+    risk_profile: str = Query("standard", description="conservative | standard | aggressive"),
+    mode: str = Query("ai", description="template | ai"),
+    trends: Optional[int] = Query(None, description="Override trends in narrative: 1=on, 0=off"),
+    cache_ttl: int = Query(0, ge=0, le=120),
+) -> Dict[str, Any]:
+    normalized_pick_type = _normalize_pick_type(pick_type)
+    normalized_odds_band = _normalize_odds_band(odds_band)
+    normalized_risk = _normalize_risk_profile(risk_profile)
+
+    try:
+        from routes import narrative as narrative_route
+
+        base = await narrative_route.get_daily_narrative(
+            mode=mode,
+            cache_ttl=cache_ttl,
+            format=None,
+            trends=trends,
+        )
+        raw = base.get("raw", {}) if isinstance(base, dict) else {}
+        meta = raw.get("meta", {}) if isinstance(raw, dict) else {}
+        source_counts = meta.get("source_counts", {}) if isinstance(meta, dict) else {}
+        source_status = meta.get("source_status", {}) if isinstance(meta, dict) else {}
+        soft_errors = meta.get("soft_errors", {}) if isinstance(meta, dict) else {}
+
+        source_counts = source_counts if isinstance(source_counts, dict) else {}
+        source_status = source_status if isinstance(source_status, dict) else {}
+        soft_errors = soft_errors if isinstance(soft_errors, dict) else {}
+
+        decision_block = _decision_from_quality(
+            pick_type=normalized_pick_type,
+            risk_profile=normalized_risk,
+            source_counts=source_counts,
+            source_status=source_status,
+        )
+
+        unavailable_sources = [k for k, v in source_status.items() if str((v or {}).get("status")) in {"no_data", "error", "disabled"}]
+
+        return {
+            "ok": True,
+            "generated_at": _now_iso(),
+            "disclaimer": "Decision-support only. No guarantee of outcomes.",
+            "constraints": {
+                "pick_type": normalized_pick_type,
+                "legs": legs,
+                "odds_band": normalized_odds_band,
+                "risk_profile": normalized_risk,
+                "mode": str(mode or "ai"),
+                "trends_override": trends,
+                "cache_ttl": cache_ttl,
+            },
+            "data_quality": {
+                "source_counts": source_counts,
+                "source_status": source_status,
+                "unavailable_sources": unavailable_sources,
+                "soft_errors": soft_errors,
+            },
+            "decision": decision_block,
+        }
+    except Exception as e:
+        return {
+            "ok": True,
+            "generated_at": _now_iso(),
+            "disclaimer": "Decision-support only. No guarantee of outcomes.",
+            "constraints": {
+                "pick_type": normalized_pick_type,
+                "legs": legs,
+                "odds_band": normalized_odds_band,
+                "risk_profile": normalized_risk,
+                "mode": str(mode or "ai"),
+                "trends_override": trends,
+                "cache_ttl": cache_ttl,
+            },
+            "data_quality": {
+                "source_counts": {},
+                "source_status": {},
+                "unavailable_sources": ["system"],
+                "soft_errors": {"system": f"picks_lab fallback: {type(e).__name__}: {e}"},
+            },
+            "decision": {
+                "recommendation": "pass",
+                "rationale": ["Pick lab could not load full data inputs; safest action is pass."],
+                "risk_flags": ["system: degraded mode"],
+            },
+        }
