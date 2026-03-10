@@ -14,6 +14,7 @@ import PlayerLiveCombined from "./components/PlayerLiveCombined";
 import LiveDashboard from "./components/LiveDashboard";
 import NarrativeDashboard from "./components/NarrativeDashboard";
 import ErrorBoundary from "./components/ErrorBoundary";
+import PickLabPage from "./components/PickLabPage";
 
 function App() {
   return (
@@ -49,6 +50,8 @@ function App() {
               <NarrativeDashboard />
             </ErrorBoundary>
           } />
+
+          <Route path="/pick-lab" element={<PickLabPage />} />
 
           {/* Optional fallback */}
           <Route path="*" element={<Navigate to="/odds" replace />} />

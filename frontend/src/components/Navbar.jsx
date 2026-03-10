@@ -27,6 +27,7 @@ const Navbar = () => {
     { to: "/odds", label: "Odds" },
     { to: "/player-trends", label: "Player Trends" },
     { to: "/player-insights", label: "Player Insights" },
+    { to: "/pick-lab", label: "Pick Lab" },
     { to: "/narrative-dashboard", label: "Narrative Dashboard" },
   ];
 

@@ -85,7 +85,10 @@ useEffect(() => {
 
             <section style={{ marginTop: "1rem" }}>
               <h3 style={{ color: "#eee" }}>Player Trends</h3>
-              {trends.player_trends.map((p, index) => (
+              {(trends.player_trends || []).length === 0 && (
+                <p style={{ color: "#888" }}>No player trends tied to this team in current live inputs.</p>
+              )}
+              {(trends.player_trends || []).map((p, index) => (
                 <div
                   key={index}
                   style={{
@@ -100,6 +103,8 @@ useEffect(() => {
                     <strong>{p.stat_type}</strong>: {p.average} avg (
                     {p.trend_direction})
                   </p>
+                  {p.matchup && <small style={{ color: "#999" }}>Matchup: {p.matchup}</small>}
+                  <br />
                   <small>Last {p.last_n_games} games</small>
                 </div>
               ))}
@@ -107,7 +112,10 @@ useEffect(() => {
 
             <section style={{ marginTop: "1.5rem" }}>
               <h3 style={{ color: "#eee" }}>Team Trends</h3>
-              {trends.team_trends.map((t, index) => (
+              {(trends.team_trends || []).length === 0 && (
+                <p style={{ color: "#888" }}>No team trend rows available for this selection.</p>
+              )}
+              {(trends.team_trends || []).map((t, index) => (
                 <div
                   key={index}
                   style={{
