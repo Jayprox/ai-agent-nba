@@ -63,7 +63,12 @@ const TrendsPage = () => {
           alignItems: "center",
         }}
       >
-        <h2 style={{ color: "#fff" }}>NBA Trends</h2>
+        <div>
+          <h2 style={{ color: "#fff", margin: 0 }}>NBA Trends (Slate Overview)</h2>
+          <p style={{ color: "#93a4bf", margin: "6px 0 0", fontSize: 13 }}>
+            Combined player + team trend snapshot for the current slate.
+          </p>
+        </div>
         <button
           onClick={toggleSource}
           style={{

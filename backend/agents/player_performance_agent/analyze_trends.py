@@ -5,8 +5,17 @@
 # and returns a summarized trend verdict for each player.
 # ==========================================================
 
-from typing import List, Dict
+from typing import List, Dict, Any
 from datetime import datetime, timezone
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
 
 
 def analyze_player_trends(players: List[Dict]) -> Dict:
@@ -18,8 +27,9 @@ def analyze_player_trends(players: List[Dict]) -> Dict:
     summaries = []
 
     for p in players:
-        last_ppg = p.get("ppg", 0)
-        season_ppg = p.get("season_ppg", 0)
+        last_ppg = _to_float(p.get("ppg"), 0.0)
+        season_ppg_raw = p.get("season_ppg")
+        season_ppg = _to_float(season_ppg_raw, last_ppg)
         diff = last_ppg - season_ppg
 
         # 🔍 Determine performance verdict based on scoring difference
@@ -33,7 +43,7 @@ def analyze_player_trends(players: List[Dict]) -> Dict:
         summaries.append({
             "player_name": p.get("player_name"),
             "ppg": last_ppg,
-            "season_ppg": season_ppg,
+            "season_ppg": season_ppg_raw if season_ppg_raw is not None else None,
             "trend": p.get("trend"),
             "verdict": verdict
         })

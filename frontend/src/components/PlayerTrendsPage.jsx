@@ -54,7 +54,12 @@ const PlayerTrendsPage = () => {
           marginBottom: "1.5rem",
         }}
       >
-        <h1>🏀 Player Trend Analysis ({useLive ? "Live" : "Mock"})</h1>
+        <div>
+          <h1 style={{ margin: 0 }}>🏀 Player Trend Analysis ({useLive ? "Live" : "Mock"})</h1>
+          <p style={{ margin: "6px 0 0", color: "#93a4bf", fontSize: 13 }}>
+            Player-only trend view. For team + slate context, use the Trends page.
+          </p>
+        </div>
         <div style={{ display: "flex", gap: "1rem" }}>
           <button
             onClick={() => setUseLive((prev) => !prev)}
@@ -86,11 +91,11 @@ const PlayerTrendsPage = () => {
         </div>
       </div>
 
-      <p>Generated: {data.generated_at}</p>
+      <p>Generated: {data.generated_at || "N/A"}</p>
       <hr style={{ margin: "1rem 0", borderColor: "#333" }} />
 
       <ul>
-        {data.summary.map((p, idx) => (
+        {(data.summary || []).map((p, idx) => (
           <li
             key={idx}
             style={{
@@ -104,12 +109,15 @@ const PlayerTrendsPage = () => {
             <strong style={{ color: "#4fc3f7" }}>{p.player_name}</strong>
             <ul style={{ listStyleType: "none", paddingLeft: "0.8rem" }}>
               <li>PPG: {p.ppg}</li>
-              <li>Season PPG: {p.season_ppg}</li>
+              <li>Season PPG: {p.season_ppg ?? "N/A"}</li>
               <li>Trend: {p.trend}</li>
               <li>Verdict: {p.verdict}</li>
             </ul>
           </li>
         ))}
+        {(data.summary || []).length === 0 && (
+          <li style={{ color: "#aaa" }}>No player trend rows available.</li>
+        )}
       </ul>
     </div>
   );
