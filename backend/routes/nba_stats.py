@@ -62,6 +62,34 @@ def _rank_30_from_score(score: float, values: List[float], reverse: bool = True)
     return len(ordered)
 
 
+def _extract_teams_from_matchup(matchup: str) -> List[str]:
+    raw = str(matchup or "").strip()
+    if not raw:
+        return []
+    if " @ " in raw:
+        away, home = raw.split(" @ ", 1)
+        return [away.strip(), home.strip()]
+    if " vs " in raw:
+        left, right = raw.split(" vs ", 1)
+        return [left.strip(), right.strip()]
+    return []
+
+
+def _minmax_norm(value: float, values: List[float], default: float = 0.5) -> float:
+    if not values:
+        return default
+    lo = min(values)
+    hi = max(values)
+    if hi == lo:
+        return default
+    norm = (value - lo) / (hi - lo)
+    if norm < 0.0:
+        return 0.0
+    if norm > 1.0:
+        return 1.0
+    return norm
+
+
 def _collect_live_team_market_rows() -> List[Dict[str, Any]]:
     odds = fetch_moneyline_odds(None, cache_ttl=30)
     rows: List[Dict[str, Any]] = []
@@ -109,24 +137,82 @@ def _collect_live_team_market_rows() -> List[Dict[str, Any]]:
     return rows
 
 
+def _collect_props_team_signals(max_total: int = 400) -> Dict[str, Dict[str, float]]:
+    """
+    Build team-level props market signal from matchup-tagged player props.
+    Since player->team mapping isn't present in current payload, we attribute matchup-level
+    market depth symmetrically to both teams for context.
+    """
+    props = fetch_player_props_for_today(max_total=max_total)
+    by_team: Dict[str, Dict[str, float]] = {}
+
+    for p in props:
+        teams = _extract_teams_from_matchup(str(p.get("matchup") or ""))
+        if len(teams) != 2:
+            continue
+        market = str(p.get("market") or "")
+        line = _safe_float(p.get("line"))
+
+        for team in teams:
+            row = by_team.setdefault(
+                team,
+                {
+                    "prop_entries": 0.0,
+                    "points_line_sum": 0.0,
+                    "points_line_count": 0.0,
+                },
+            )
+            row["prop_entries"] += 0.5  # split matchup signal between both teams
+            if market == "player_points" and line is not None:
+                row["points_line_sum"] += line / 2.0
+                row["points_line_count"] += 0.5
+
+    out: Dict[str, Dict[str, float]] = {}
+    for team, row in by_team.items():
+        line_count = row.get("points_line_count", 0.0)
+        out[team] = {
+            "prop_entries": float(row.get("prop_entries", 0.0)),
+            "points_line_avg": (float(row.get("points_line_sum", 0.0)) / line_count) if line_count > 0 else 0.0,
+        }
+    return out
+
+
 def _build_live_offense_teams(limit: int = 20) -> List[Dict[str, Any]]:
     rows = _collect_live_team_market_rows()
     if not rows:
         return []
 
+    prop_signals = _collect_props_team_signals(max_total=400)
     scores: Dict[str, float] = {}
     for r in rows:
         team = str(r.get("team_name") or "")
         p = _safe_float(r.get("win_prob")) or 0.5
         scores[team] = max(scores.get(team, 0.0), p)
 
-    all_scores = list(scores.values())
-    teams: List[Dict[str, Any]] = []
+    prop_entries_values = [float(v.get("prop_entries", 0.0)) for v in prop_signals.values()] or [0.0]
+    points_line_values = [float(v.get("points_line_avg", 0.0)) for v in prop_signals.values()] or [0.0]
+
+    composite_scores: Dict[str, float] = {}
     for team_name, win_prob in scores.items():
-        offense_score = round(95.0 + (win_prob * 30.0), 1)
-        assists = round(17.0 + (win_prob * 10.0), 1)
-        rebounds = round(40.0 + ((1.0 - win_prob) * 6.0), 1)
-        rank = _rank_30_from_score(win_prob, all_scores, reverse=True)
+        signals = prop_signals.get(team_name, {})
+        activity = float(signals.get("prop_entries", 0.0))
+        points_line = float(signals.get("points_line_avg", 0.0))
+        activity_norm = _minmax_norm(activity, prop_entries_values, default=0.5)
+        points_norm = _minmax_norm(points_line, points_line_values, default=0.5)
+        composite = (0.65 * win_prob) + (0.20 * points_norm) + (0.15 * activity_norm)
+        composite_scores[team_name] = composite
+
+    all_scores = list(composite_scores.values())
+    teams: List[Dict[str, Any]] = []
+    for team_name, composite in composite_scores.items():
+        win_prob = scores.get(team_name, 0.5)
+        signals = prop_signals.get(team_name, {})
+        points_line = float(signals.get("points_line_avg", 0.0))
+        prop_entries = float(signals.get("prop_entries", 0.0))
+        offense_score = round(95.0 + (composite * 30.0), 1)
+        assists = round(17.0 + (composite * 10.0), 1)
+        rebounds = round(40.0 + ((1.0 - composite) * 6.0), 1)
+        rank = _rank_30_from_score(composite, all_scores, reverse=True)
         teams.append(
             {
                 "team_name": team_name,
@@ -139,7 +225,14 @@ def _build_live_offense_teams(limit: int = 20) -> List[Dict[str, Any]]:
                 "points_per_game": offense_score,
                 "assists_per_game": assists,
                 "rebounds_per_game": rebounds,
-                "source": "live_odds_proxy",
+                "source": "live_blended_odds_props",
+                "ranking_model": "odds_prob(65%) + points_props_context(20%) + props_market_depth(15%)",
+                "signal_inputs": {
+                    "win_prob": round(win_prob, 4),
+                    "points_line_avg": round(points_line, 2) if points_line else 0.0,
+                    "prop_entries": int(round(prop_entries)),
+                    "composite_score": round(composite, 4),
+                },
             }
         )
 
@@ -152,20 +245,39 @@ def _build_live_defense_teams(limit: int = 20) -> List[Dict[str, Any]]:
     if not rows:
         return []
 
+    prop_signals = _collect_props_team_signals(max_total=400)
     scores: Dict[str, float] = {}
     for r in rows:
         team = str(r.get("team_name") or "")
         p = _safe_float(r.get("win_prob")) or 0.5
         scores[team] = max(scores.get(team, 0.0), p)
 
-    all_scores = list(scores.values())
-    teams: List[Dict[str, Any]] = []
+    prop_entries_values = [float(v.get("prop_entries", 0.0)) for v in prop_signals.values()] or [0.0]
+    points_line_values = [float(v.get("points_line_avg", 0.0)) for v in prop_signals.values()] or [0.0]
+
+    composite_scores: Dict[str, float] = {}
     for team_name, win_prob in scores.items():
-        defense_score = round(116.0 - (win_prob * 8.0), 1)
-        opp_points = round(114.0 - (win_prob * 10.0), 1)
-        opp_rebounds = round(47.0 - (win_prob * 4.0), 1)
-        opp_assists = round(27.0 - (win_prob * 4.0), 1)
-        rank = _rank_30_from_score(win_prob, all_scores, reverse=True)
+        signals = prop_signals.get(team_name, {})
+        activity = float(signals.get("prop_entries", 0.0))
+        points_line = float(signals.get("points_line_avg", 0.0))
+        activity_norm = _minmax_norm(activity, prop_entries_values, default=0.5)
+        points_norm = _minmax_norm(points_line, points_line_values, default=0.5)
+        # Defense benefits from lower projected scoring environment.
+        composite = (0.65 * win_prob) + (0.20 * (1.0 - points_norm)) + (0.15 * activity_norm)
+        composite_scores[team_name] = composite
+
+    all_scores = list(composite_scores.values())
+    teams: List[Dict[str, Any]] = []
+    for team_name, composite in composite_scores.items():
+        win_prob = scores.get(team_name, 0.5)
+        signals = prop_signals.get(team_name, {})
+        points_line = float(signals.get("points_line_avg", 0.0))
+        prop_entries = float(signals.get("prop_entries", 0.0))
+        defense_score = round(116.0 - (composite * 8.0), 1)
+        opp_points = round(114.0 - (composite * 10.0), 1)
+        opp_rebounds = round(47.0 - (composite * 4.0), 1)
+        opp_assists = round(27.0 - (composite * 4.0), 1)
+        rank = _rank_30_from_score(composite, all_scores, reverse=True)
         teams.append(
             {
                 "team_name": team_name,
@@ -179,7 +291,14 @@ def _build_live_defense_teams(limit: int = 20) -> List[Dict[str, Any]]:
                 "rank_sf_def": min(30, rank + 3),
                 "rank_pf_def": min(30, rank + 4),
                 "rank_c_def": min(30, rank + 5),
-                "source": "live_odds_proxy",
+                "source": "live_blended_odds_props",
+                "ranking_model": "odds_prob(65%) + inverse_points_props_context(20%) + props_market_depth(15%)",
+                "signal_inputs": {
+                    "win_prob": round(win_prob, 4),
+                    "points_line_avg": round(points_line, 2) if points_line else 0.0,
+                    "prop_entries": int(round(prop_entries)),
+                    "composite_score": round(composite, 4),
+                },
             }
         )
 
@@ -479,7 +598,7 @@ async def offense_teams() -> Dict[str, Any]:
             return {
                 "date_generated": _now_iso(),
                 "teams": teams,
-                "source": "live_odds_proxy",
+                "source": str(teams[0].get("source") or "live_blended_odds_props"),
             }
     except Exception as e:
         live_error = f"{type(e).__name__}: {e}"
@@ -510,7 +629,7 @@ async def defense_teams() -> Dict[str, Any]:
             return {
                 "date_generated": _now_iso(),
                 "teams": teams,
-                "source": "live_odds_proxy",
+                "source": str(teams[0].get("source") or "live_blended_odds_props"),
             }
     except Exception as e:
         live_error = f"{type(e).__name__}: {e}"
