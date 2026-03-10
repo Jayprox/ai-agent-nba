@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import TrendsModal from "./TrendsModal";
 import { API_BASE_URL } from "../config/api";
 
 const TeamDefensePage = () => {
   const [defenseData, setDefenseData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [selectedTeam, setSelectedTeam] = useState(null);
 
   useEffect(() => {
     const fetchDefense = async () => {
@@ -36,6 +38,7 @@ const TeamDefensePage = () => {
       {defenseData.teams.map((team, index) => (
         <div
           key={index}
+          onClick={() => setSelectedTeam(team.team_name)}
           style={{
             border: "1px solid #333",
             borderRadius: "10px",
@@ -45,7 +48,11 @@ const TeamDefensePage = () => {
             color: "#eee",
             textAlign: "center",
             boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
+            cursor: "pointer",
+            transition: "transform 0.15s ease",
           }}
+          onMouseEnter={(e) => (e.currentTarget.style.transform = "scale(1.02)")}
+          onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
         >
           <h3 style={{ color: "#fff", fontWeight: "600" }}>
             #{team.rank_overall} — {team.team_name}
@@ -62,6 +69,10 @@ const TeamDefensePage = () => {
           </p>
         </div>
       ))}
+
+      {selectedTeam && (
+        <TrendsModal teamName={selectedTeam} onClose={() => setSelectedTeam(null)} />
+      )}
     </div>
   );
 };
