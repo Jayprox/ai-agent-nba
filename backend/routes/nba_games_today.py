@@ -22,8 +22,10 @@ def _normalize_game(game: Dict[str, Any]) -> Dict[str, Any]:
     status = game.get("status", {}) or {}
     scores = game.get("scores", {}) or {}
 
-    home = teams.get("home", {}) or {}
-    away = teams.get("away", {}) or {}
+    # Support both API-Basketball shape (teams.home/teams.away)
+    # and fallback shape (home_team/away_team).
+    home = teams.get("home", {}) or game.get("home_team", {}) or {}
+    away = teams.get("away", {}) or game.get("away_team", {}) or {}
 
     return {
         "id": game.get("id"),

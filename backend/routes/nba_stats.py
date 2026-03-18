@@ -675,6 +675,18 @@ async def trends_live(team: Optional[str] = Query(None, description="Optional te
             return payload
         return await trends()
     except Exception:
+        if team:
+            return {
+                "date_generated": _now_iso(),
+                "player_trends": [],
+                "team_trends": [],
+                "meta": {
+                    "provider": "live_unavailable",
+                    "filtered_for_team": team,
+                    "count_player_trends": 0,
+                    "count_team_trends": 0,
+                },
+            }
         return await trends()
 
 

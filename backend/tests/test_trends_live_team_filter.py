@@ -83,3 +83,19 @@ def test_trends_live_team_filter_no_match_returns_empty(monkeypatch):
     assert data.get("meta", {}).get("filtered_for_team") == "Unknown Team"
     assert data.get("player_trends") == []
     assert data.get("team_trends") == []
+
+
+def test_trends_live_team_filter_on_live_error_returns_empty_not_mock(monkeypatch):
+    def fake_live_payload_error():
+        raise RuntimeError("upstream live unavailable")
+
+    monkeypatch.setattr(nba_stats, "_build_live_trends_payload", fake_live_payload_error, raising=False)
+
+    client = TestClient(app)
+    res = client.get("/nba/trends/live?team=Milwaukee%20Bucks")
+    assert res.status_code == 200
+    data = res.json()
+    assert data.get("meta", {}).get("provider") == "live_unavailable"
+    assert data.get("meta", {}).get("filtered_for_team") == "Milwaukee Bucks"
+    assert data.get("player_trends") == []
+    assert data.get("team_trends") == []
