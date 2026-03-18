@@ -58,14 +58,22 @@ export default function PickLabPage() {
   const [legs, setLegs] = useState(2);
   const [oddsBand, setOddsBand] = useState("minus_100_to_plus_500");
   const [riskProfile, setRiskProfile] = useState("standard");
+
   const [loading, setLoading] = useState(false);
   const [trackLoading, setTrackLoading] = useState(false);
   const [error, setError] = useState("");
   const [trackMessage, setTrackMessage] = useState("");
+
   const [data, setData] = useState(null);
   const [sportsbookOdds, setSportsbookOdds] = useState("");
   const [performance, setPerformance] = useState(null);
   const [recentPicks, setRecentPicks] = useState([]);
+
+  const [filterPickType, setFilterPickType] = useState("");
+  const [filterStatus, setFilterStatus] = useState("");
+  const [filterResult, setFilterResult] = useState("");
+  const [filterDateFrom, setFilterDateFrom] = useState("");
+  const [filterDateTo, setFilterDateTo] = useState("");
 
   const query = useMemo(() => {
     const p = new URLSearchParams();
@@ -96,9 +104,17 @@ export default function PickLabPage() {
 
   const fetchPerformance = async () => {
     try {
+      const trackedParams = new URLSearchParams();
+      trackedParams.set("limit", "50");
+      if (filterPickType) trackedParams.set("pick_type", filterPickType);
+      if (filterStatus) trackedParams.set("status", filterStatus);
+      if (filterResult) trackedParams.set("result", filterResult);
+      if (filterDateFrom) trackedParams.set("date_from", filterDateFrom);
+      if (filterDateTo) trackedParams.set("date_to", filterDateTo);
+
       const [perfRes, recentRes] = await Promise.all([
         fetch(`${API_BASE_URL}/nba/picks/performance`),
-        fetch(`${API_BASE_URL}/nba/picks/tracked?limit=5`),
+        fetch(`${API_BASE_URL}/nba/picks/tracked?${trackedParams.toString()}`),
       ]);
       if (perfRes.ok) setPerformance(await perfRes.json());
       if (recentRes.ok) {
@@ -106,8 +122,19 @@ export default function PickLabPage() {
         setRecentPicks(r?.picks || []);
       }
     } catch {
-      // Keep UI resilient; do not block main page on tracking panel failures.
+      // keep resilient
     }
+  };
+
+  const exportCsv = () => {
+    const p = new URLSearchParams();
+    if (filterPickType) p.set("pick_type", filterPickType);
+    if (filterStatus) p.set("status", filterStatus);
+    if (filterResult) p.set("result", filterResult);
+    if (filterDateFrom) p.set("date_from", filterDateFrom);
+    if (filterDateTo) p.set("date_to", filterDateTo);
+    const url = `${API_BASE_URL}/nba/picks/tracked/export.csv${p.toString() ? `?${p.toString()}` : ""}`;
+    window.open(url, "_blank");
   };
 
   const editPick = async (pick) => {
@@ -123,6 +150,7 @@ export default function PickLabPage() {
       stake_units: nextStakeRaw === "" ? null : Number(nextStakeRaw),
       notes: nextNotes,
     };
+
     try {
       const res = await fetch(`${API_BASE_URL}/nba/picks/${pick.pick_id}`, {
         method: "PATCH",
@@ -185,15 +213,10 @@ export default function PickLabPage() {
 
   useEffect(() => {
     fetchPerformance();
-  }, []);
+  }, [filterPickType, filterStatus, filterResult, filterDateFrom, filterDateTo]);
 
   const recommendation = String(data?.decision?.recommendation || "pass").toUpperCase();
-  const recColor =
-    recommendation === "BET"
-      ? "#22c55e"
-      : recommendation === "LEAN"
-      ? "#f59e0b"
-      : "#ef4444";
+  const recColor = recommendation === "BET" ? "#22c55e" : recommendation === "LEAN" ? "#f59e0b" : "#ef4444";
 
   const sourceStatus = data?.data_quality?.source_status || {};
   const sourceCounts = data?.data_quality?.source_counts || {};
@@ -210,74 +233,37 @@ export default function PickLabPage() {
     <div style={{ color: "#e5e7eb", padding: "16px", maxWidth: 1160, margin: "0 auto" }}>
       <div style={{ ...baseCard, marginBottom: 12 }}>
         <h1 style={{ margin: 0, fontSize: 32, lineHeight: 1.1 }}>Research-to-Pick Lab</h1>
-        <p style={{ margin: "8px 0 0", color: "#9ca3af" }}>
-          Decision-support workflow. No lock language, no guarantees.
-        </p>
+        <p style={{ margin: "8px 0 0", color: "#9ca3af" }}>Decision-support workflow. No lock language, no guarantees.</p>
       </div>
 
-      <div
-        style={{
-          ...baseCard,
-          marginBottom: 12,
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-          gap: 10,
-        }}
-      >
+      <div style={{ ...baseCard, marginBottom: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
         <label>
           <div style={{ marginBottom: 4, color: "#93c5fd", fontWeight: 700 }}>Pick Type</div>
           <select value={pickType} onChange={(e) => setPickType(e.target.value)} style={{ width: "100%", padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }}>
-            {PICK_TYPES.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
+            {PICK_TYPES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </label>
 
         <label>
           <div style={{ marginBottom: 4, color: "#93c5fd", fontWeight: 700 }}>Legs</div>
-          <input
-            type="number"
-            min={1}
-            max={12}
-            value={legs}
-            onChange={(e) => setLegs(Math.max(1, Math.min(12, Number(e.target.value || 1))))}
-            disabled={pickType === "straight" || pickType === "sleeper"}
-            style={{ width: "100%", padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }}
-          />
+          <input type="number" min={1} max={12} value={legs} onChange={(e) => setLegs(Math.max(1, Math.min(12, Number(e.target.value || 1))))} disabled={pickType === "straight" || pickType === "sleeper"} style={{ width: "100%", padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }} />
         </label>
 
         <label>
           <div style={{ marginBottom: 4, color: "#93c5fd", fontWeight: 700 }}>Odds Band</div>
           <select value={oddsBand} onChange={(e) => setOddsBand(e.target.value)} style={{ width: "100%", padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }}>
-            {ODDS_BANDS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
+            {ODDS_BANDS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </label>
 
         <label>
           <div style={{ marginBottom: 4, color: "#93c5fd", fontWeight: 700 }}>Risk Profile</div>
           <select value={riskProfile} onChange={(e) => setRiskProfile(e.target.value)} style={{ width: "100%", padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }}>
-            {RISK_PROFILES.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
+            {RISK_PROFILES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </label>
 
-        <button
-          onClick={fetchPickLab}
-          disabled={loading}
-          style={{
-            alignSelf: "end",
-            padding: "10px 12px",
-            borderRadius: 10,
-            border: "1px solid #2563eb",
-            background: loading ? "#1e3a8a" : "#2563eb",
-            color: "#fff",
-            fontWeight: 800,
-            cursor: "pointer",
-          }}
-        >
+        <button onClick={fetchPickLab} disabled={loading} style={{ alignSelf: "end", padding: "10px 12px", borderRadius: 10, border: "1px solid #2563eb", background: loading ? "#1e3a8a" : "#2563eb", color: "#fff", fontWeight: 800, cursor: "pointer" }}>
           {loading ? "Refreshing..." : "Run Decision"}
         </button>
       </div>
@@ -287,19 +273,13 @@ export default function PickLabPage() {
       <div style={{ ...baseCard, marginBottom: 12 }}>
         <h2 style={{ marginTop: 0 }}>Data Quality Snapshot</h2>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
-          {Object.entries(sourceStatus).map(([key, value]) => (
-            <SourceStatusPill key={key} name={key} entry={value} />
-          ))}
+          {Object.entries(sourceStatus).map(([key, value]) => <SourceStatusPill key={key} name={key} entry={value} />)}
           {Object.keys(sourceStatus).length === 0 && <span style={{ color: "#93a4bf" }}>No source status available.</span>}
         </div>
         <div style={{ fontSize: 13, color: "#cbd5e1" }}>
           Counts: games={Number(sourceCounts?.games_today || 0)}, odds_games={Number(sourceCounts?.odds_games || 0)}, player_props={Number(sourceCounts?.player_props || 0)}, player_trends={Number(sourceCounts?.player_trends || 0)}, team_trends={Number(sourceCounts?.team_trends || 0)}
         </div>
-        {unavailable.length > 0 && (
-          <div style={{ marginTop: 8, color: "#fca5a5", fontSize: 13 }}>
-            Unavailable sources: {unavailable.join(", ")}
-          </div>
-        )}
+        {unavailable.length > 0 && <div style={{ marginTop: 8, color: "#fca5a5", fontSize: 13 }}>Unavailable sources: {unavailable.join(", ")}</div>}
       </div>
 
       <div style={{ ...baseCard, marginBottom: 12 }}>
@@ -360,32 +340,10 @@ export default function PickLabPage() {
 
         <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end" }}>
           <label>
-            <div style={{ marginBottom: 4, color: "#93c5fd", fontWeight: 700, fontSize: 12 }}>
-              Sportsbook Odds (decimal)
-            </div>
-            <input
-              type="number"
-              step="0.01"
-              min="1.01"
-              value={sportsbookOdds}
-              onChange={(e) => setSportsbookOdds(e.target.value)}
-              style={{ padding: "8px 10px", borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }}
-              placeholder="e.g. 1.91"
-            />
+            <div style={{ marginBottom: 4, color: "#93c5fd", fontWeight: 700, fontSize: 12 }}>Sportsbook Odds (decimal)</div>
+            <input type="number" step="0.01" min="1.01" value={sportsbookOdds} onChange={(e) => setSportsbookOdds(e.target.value)} style={{ padding: "8px 10px", borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }} placeholder="e.g. 1.91" />
           </label>
-          <button
-            onClick={trackCurrentPick}
-            disabled={trackLoading || !data}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid #16a34a",
-              background: trackLoading ? "#166534" : "#15803d",
-              color: "#fff",
-              fontWeight: 800,
-              cursor: "pointer",
-            }}
-          >
+          <button onClick={trackCurrentPick} disabled={trackLoading || !data} style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #16a34a", background: trackLoading ? "#166534" : "#15803d", color: "#fff", fontWeight: 800, cursor: "pointer" }}>
             {trackLoading ? "Tracking..." : "Track This Pick"}
           </button>
           {trackMessage && <span style={{ color: "#cbd5e1", fontSize: 13 }}>{trackMessage}</span>}
@@ -411,43 +369,48 @@ export default function PickLabPage() {
                 </div>
               ))}
             </div>
+
             <div style={{ marginTop: 10 }}>
-              <div style={{ fontWeight: 700, marginBottom: 6 }}>Recent Picks</div>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>Tracked Picks</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, marginBottom: 10 }}>
+                <select value={filterPickType} onChange={(e) => setFilterPickType(e.target.value)} style={{ padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }}>
+                  <option value="">All pick types</option>
+                  <option value="straight">straight</option>
+                  <option value="smart_parlay">smart_parlay</option>
+                  <option value="lotto_parlay">lotto_parlay</option>
+                  <option value="sleeper">sleeper</option>
+                </select>
+                <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} style={{ padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }}>
+                  <option value="">All status</option>
+                  <option value="open">open</option>
+                  <option value="settled">settled</option>
+                </select>
+                <select value={filterResult} onChange={(e) => setFilterResult(e.target.value)} style={{ padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }}>
+                  <option value="">All results</option>
+                  <option value="win">win</option>
+                  <option value="loss">loss</option>
+                  <option value="push">push</option>
+                </select>
+                <input type="date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} style={{ padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }} />
+                <input type="date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} style={{ padding: 8, borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }} />
+                <button onClick={exportCsv} style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #334155", background: "#111827", color: "#e5e7eb", cursor: "pointer", fontWeight: 700 }}>
+                  Export CSV
+                </button>
+              </div>
+
               <ul style={{ marginTop: 0 }}>
                 {recentPicks.map((p) => (
                   <li key={p.pick_id} style={{ marginBottom: 8 }}>
                     <span>{p.pick_type} | {p.recommendation} | status={p.status}</span>
-                    <span style={{ marginLeft: 8, color: "#93a4bf", fontSize: 12 }}>
-                      odds={p.sportsbook_odds_decimal ?? "N/A"} | stake={p.stake_units ?? "N/A"}
-                    </span>
+                    <span style={{ marginLeft: 8, color: "#93a4bf", fontSize: 12 }}>odds={p.sportsbook_odds_decimal ?? "N/A"} | stake={p.stake_units ?? "N/A"}</span>
                     {p.notes ? <span style={{ marginLeft: 8, color: "#93a4bf", fontSize: 12 }}>notes="{p.notes}"</span> : null}
                     <span style={{ marginLeft: 8, display: "inline-flex", gap: 6 }}>
                       {p.status === "open" && (
-                        <button
-                          onClick={() => editPick(p)}
-                          style={{
-                            padding: "2px 8px",
-                            borderRadius: 8,
-                            border: "1px solid #334155",
-                            background: "#0f172a",
-                            color: "#e5e7eb",
-                            cursor: "pointer",
-                          }}
-                        >
+                        <button onClick={() => editPick(p)} style={{ padding: "2px 8px", borderRadius: 8, border: "1px solid #334155", background: "#0f172a", color: "#e5e7eb", cursor: "pointer" }}>
                           Edit
                         </button>
                       )}
-                      <button
-                        onClick={() => deletePick(p)}
-                        style={{
-                          padding: "2px 8px",
-                          borderRadius: 8,
-                          border: "1px solid #7f1d1d",
-                          background: "#2a0d0d",
-                          color: "#fecaca",
-                          cursor: "pointer",
-                        }}
-                      >
+                      <button onClick={() => deletePick(p)} style={{ padding: "2px 8px", borderRadius: 8, border: "1px solid #7f1d1d", background: "#2a0d0d", color: "#fecaca", cursor: "pointer" }}>
                         Delete
                       </button>
                     </span>

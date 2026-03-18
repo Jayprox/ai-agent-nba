@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Response
 
 from agents.team_offense_agent.fetch_offense import fetch_team_offense_data
 from agents.team_defense_agent.fetch_defense import fetch_team_defense_data
@@ -567,6 +567,20 @@ def _normalize_result(value: str) -> str:
     v = str(value or "").strip().lower()
     allowed = {"win", "loss", "push"}
     return v if v in allowed else "push"
+
+
+def _iso_in_range(iso_value: str, date_from: Optional[str], date_to: Optional[str]) -> bool:
+    try:
+        if not iso_value:
+            return False
+        d = str(iso_value)[:10]
+        if date_from and d < date_from:
+            return False
+        if date_to and d > date_to:
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def _risk_flag_text(source: str, entry: Dict[str, Any]) -> str:
@@ -1180,6 +1194,9 @@ async def list_tracked_picks(
     limit: int = Query(20, ge=1, le=200),
     status: Optional[str] = Query(None),
     pick_type: Optional[str] = Query(None),
+    result: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="YYYY-MM-DD"),
 ) -> Dict[str, Any]:
     with _PICKS_LOCK:
         rows = _load_picks()
@@ -1190,10 +1207,97 @@ async def list_tracked_picks(
             continue
         if pick_type and str(r.get("pick_type")) != pick_type:
             continue
+        if result and str(r.get("result")) != result:
+            continue
+        if date_from or date_to:
+            created_at = str(r.get("created_at") or "")
+            if not _iso_in_range(created_at, date_from, date_to):
+                continue
         filtered.append(r)
 
     filtered.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
     return {"ok": True, "count": len(filtered[:limit]), "picks": filtered[:limit]}
+
+
+@router.get("/picks/tracked/export.csv")
+async def export_tracked_picks_csv(
+    status: Optional[str] = Query(None),
+    pick_type: Optional[str] = Query(None),
+    result: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="YYYY-MM-DD"),
+) -> Response:
+    with _PICKS_LOCK:
+        rows = _load_picks()
+
+    filtered = []
+    for r in rows:
+        if status and str(r.get("status")) != status:
+            continue
+        if pick_type and str(r.get("pick_type")) != pick_type:
+            continue
+        if result and str(r.get("result")) != result:
+            continue
+        if date_from or date_to:
+            created_at = str(r.get("created_at") or "")
+            if not _iso_in_range(created_at, date_from, date_to):
+                continue
+        filtered.append(r)
+
+    filtered.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+    headers = [
+        "pick_id",
+        "created_at",
+        "status",
+        "pick_type",
+        "result",
+        "recommendation",
+        "sportsbook_odds_decimal",
+        "closing_odds_decimal",
+        "stake_units",
+        "pnl_units",
+        "clv",
+        "legs",
+        "odds_band",
+        "risk_profile",
+        "notes",
+    ]
+
+    def csv_val(v: Any) -> str:
+        text = "" if v is None else str(v)
+        text = text.replace('"', '""')
+        return f"\"{text}\""
+
+    lines = [",".join(headers)]
+    for r in filtered:
+        lines.append(
+            ",".join(
+                [
+                    csv_val(r.get("pick_id")),
+                    csv_val(r.get("created_at")),
+                    csv_val(r.get("status")),
+                    csv_val(r.get("pick_type")),
+                    csv_val(r.get("result")),
+                    csv_val(r.get("recommendation")),
+                    csv_val(r.get("sportsbook_odds_decimal")),
+                    csv_val(r.get("closing_odds_decimal")),
+                    csv_val(r.get("stake_units")),
+                    csv_val(r.get("pnl_units")),
+                    csv_val(r.get("clv")),
+                    csv_val(r.get("legs")),
+                    csv_val(r.get("odds_band")),
+                    csv_val(r.get("risk_profile")),
+                    csv_val(r.get("notes")),
+                ]
+            )
+        )
+
+    content = "\n".join(lines) + "\n"
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=picks_tracked_export.csv"},
+    )
 
 
 @router.get("/picks/performance")
