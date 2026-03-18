@@ -110,6 +110,47 @@ export default function PickLabPage() {
     }
   };
 
+  const editPick = async (pick) => {
+    if (!pick || pick.status !== "open") return;
+    const nextOddsRaw = window.prompt("Edit sportsbook odds (decimal):", String(pick.sportsbook_odds_decimal ?? ""));
+    if (nextOddsRaw === null) return;
+    const nextStakeRaw = window.prompt("Edit stake units:", String(pick.stake_units ?? 1));
+    if (nextStakeRaw === null) return;
+    const nextNotes = window.prompt("Edit notes:", String(pick.notes ?? "")) ?? "";
+
+    const payload = {
+      sportsbook_odds_decimal: nextOddsRaw === "" ? null : Number(nextOddsRaw),
+      stake_units: nextStakeRaw === "" ? null : Number(nextStakeRaw),
+      notes: nextNotes,
+    };
+    try {
+      const res = await fetch(`${API_BASE_URL}/nba/picks/${pick.pick_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchPerformance();
+      setTrackMessage(`Updated pick ${pick.pick_id}`);
+    } catch (e) {
+      setTrackMessage(`Edit failed: ${e?.message || "Unknown error"}`);
+    }
+  };
+
+  const deletePick = async (pick) => {
+    if (!pick) return;
+    const ok = window.confirm(`Delete pick ${pick.pick_id}?`);
+    if (!ok) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/nba/picks/${pick.pick_id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchPerformance();
+      setTrackMessage(`Deleted pick ${pick.pick_id}`);
+    } catch (e) {
+      setTrackMessage(`Delete failed: ${e?.message || "Unknown error"}`);
+    }
+  };
+
   const trackCurrentPick = async () => {
     if (!data) return;
     setTrackLoading(true);
@@ -348,8 +389,42 @@ export default function PickLabPage() {
               <div style={{ fontWeight: 700, marginBottom: 6 }}>Recent Picks</div>
               <ul style={{ marginTop: 0 }}>
                 {recentPicks.map((p) => (
-                  <li key={p.pick_id}>
-                    {p.pick_type} | {p.recommendation} | status={p.status}
+                  <li key={p.pick_id} style={{ marginBottom: 8 }}>
+                    <span>{p.pick_type} | {p.recommendation} | status={p.status}</span>
+                    <span style={{ marginLeft: 8, color: "#93a4bf", fontSize: 12 }}>
+                      odds={p.sportsbook_odds_decimal ?? "N/A"} | stake={p.stake_units ?? "N/A"}
+                    </span>
+                    {p.notes ? <span style={{ marginLeft: 8, color: "#93a4bf", fontSize: 12 }}>notes="{p.notes}"</span> : null}
+                    <span style={{ marginLeft: 8, display: "inline-flex", gap: 6 }}>
+                      {p.status === "open" && (
+                        <button
+                          onClick={() => editPick(p)}
+                          style={{
+                            padding: "2px 8px",
+                            borderRadius: 8,
+                            border: "1px solid #334155",
+                            background: "#0f172a",
+                            color: "#e5e7eb",
+                            cursor: "pointer",
+                          }}
+                        >
+                          Edit
+                        </button>
+                      )}
+                      <button
+                        onClick={() => deletePick(p)}
+                        style={{
+                          padding: "2px 8px",
+                          borderRadius: 8,
+                          border: "1px solid #7f1d1d",
+                          background: "#2a0d0d",
+                          color: "#fecaca",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </span>
                   </li>
                 ))}
                 {recentPicks.length === 0 && <li>No tracked picks yet.</li>}

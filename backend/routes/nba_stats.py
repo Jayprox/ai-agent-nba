@@ -1014,6 +1014,7 @@ async def track_pick(payload: Dict[str, Any] = Body(default_factory=dict)) -> Di
         "closing_odds_decimal": None,
         "result": None,
         "stake_units": 1.0,
+        "notes": str(payload.get("notes") or ""),
         "pnl_units": None,
         "clv": None,
         "rationale": list(decision.get("rationale") or payload.get("rationale") or []),
@@ -1027,6 +1028,40 @@ async def track_pick(payload: Dict[str, Any] = Body(default_factory=dict)) -> Di
     with _PICKS_LOCK:
         rows = _load_picks()
         rows.append(row)
+        _save_picks(rows)
+
+    return {"ok": True, "pick": row}
+
+
+@router.patch("/picks/{pick_id}")
+async def edit_pick(
+    pick_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
+    sportsbook_odds_decimal = _to_float_or_none(payload.get("sportsbook_odds_decimal"))
+    stake_units = _to_float_or_none(payload.get("stake_units"))
+    notes_raw = payload.get("notes")
+    notes = str(notes_raw) if notes_raw is not None else None
+
+    with _PICKS_LOCK:
+        rows = _load_picks()
+        idx = next((i for i, r in enumerate(rows) if str(r.get("pick_id")) == pick_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="pick_id not found")
+
+        row = dict(rows[idx])
+        if str(row.get("status")) == "settled":
+            raise HTTPException(status_code=409, detail="settled picks are immutable")
+
+        if sportsbook_odds_decimal is not None:
+            row["sportsbook_odds_decimal"] = sportsbook_odds_decimal
+        if stake_units is not None:
+            row["stake_units"] = float(max(0.01, stake_units))
+        if notes is not None:
+            row["notes"] = notes
+        row["updated_at"] = _now_iso()
+
+        rows[idx] = row
         _save_picks(rows)
 
     return {"ok": True, "pick": row}
@@ -1061,6 +1096,18 @@ async def settle_pick(
         _save_picks(rows)
 
     return {"ok": True, "pick": row}
+
+
+@router.delete("/picks/{pick_id}")
+async def delete_pick(pick_id: str) -> Dict[str, Any]:
+    with _PICKS_LOCK:
+        rows = _load_picks()
+        idx = next((i for i, r in enumerate(rows) if str(r.get("pick_id")) == pick_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="pick_id not found")
+        removed = rows.pop(idx)
+        _save_picks(rows)
+    return {"ok": True, "deleted_pick_id": pick_id, "deleted_status": removed.get("status")}
 
 
 @router.get("/picks/tracked")
