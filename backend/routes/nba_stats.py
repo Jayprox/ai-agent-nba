@@ -17,10 +17,24 @@ from agents.player_performance_agent.fetch_insights import get_player_insights
 from agents.player_performance_agent.analyze_trends import analyze_player_trends
 from common.odds_utils import fetch_moneyline_odds
 from common.player_props_utils import fetch_player_props_for_today
+from services.api_basketball_service import get_today_games
 
 router = APIRouter(prefix="/nba", tags=["NBA Stats"])
 _PICKS_STORE_PATH = Path(__file__).resolve().parents[1] / "data" / "picks_tracking.json"
 _PICKS_LOCK = threading.Lock()
+_SOURCE_DIAG_LOCK = threading.Lock()
+_SOURCE_NAMES = ("games_today", "odds", "trends", "player_props")
+_SOURCE_DIAGNOSTICS: Dict[str, Dict[str, Any]] = {
+    k: {
+        "source": k,
+        "last_attempt_at": None,
+        "last_success_at": None,
+        "last_status": "unknown",
+        "last_count": 0,
+        "last_error": "",
+    }
+    for k in _SOURCE_NAMES
+}
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -91,6 +105,47 @@ def _calc_pnl_units(result: str, stake_units: float, odds_decimal: Optional[floa
     if r == "loss":
         return round(-stake_units, 4)
     return 0.0
+
+
+def _update_source_diag(source: str, *, status: str, count: int = 0, error: str = "") -> None:
+    if source not in _SOURCE_DIAGNOSTICS:
+        return
+    now = _now_iso()
+    with _SOURCE_DIAG_LOCK:
+        row = dict(_SOURCE_DIAGNOSTICS[source])
+        row["last_attempt_at"] = now
+        row["last_status"] = status
+        row["last_count"] = int(max(0, count))
+        row["last_error"] = str(error or "")
+        if status == "ok":
+            row["last_success_at"] = now
+        _SOURCE_DIAGNOSTICS[source] = row
+
+
+def _snapshot_source_diagnostics() -> Dict[str, Dict[str, Any]]:
+    with _SOURCE_DIAG_LOCK:
+        return {k: dict(v) for k, v in _SOURCE_DIAGNOSTICS.items()}
+
+
+def _update_diagnostics_from_source_status(
+    source_status: Dict[str, Dict[str, Any]],
+    soft_errors: Dict[str, str],
+) -> None:
+    # Map narrative source keys to diagnostics keys.
+    mapping = {
+        "games_today": "games_today",
+        "odds": "odds",
+        "trends": "trends",
+        "player_props": "player_props",
+    }
+    for src_key, diag_key in mapping.items():
+        entry = (source_status or {}).get(src_key) or {}
+        status = str(entry.get("status") or "unknown")
+        count = int(entry.get("count") or 0)
+        err = str(entry.get("error") or "")
+        if not err:
+            err = str((soft_errors or {}).get(src_key) or "")
+        _update_source_diag(diag_key, status=status, count=count, error=err)
 
 
 def _decimal_to_win_prob(decimal_price: Optional[float]) -> Optional[float]:
@@ -997,6 +1052,7 @@ async def picks_lab(
         )
 
         unavailable_sources = [k for k, v in source_status.items() if str((v or {}).get("status")) in {"no_data", "error", "disabled"}]
+        _update_diagnostics_from_source_status(source_status, soft_errors)
         refresh_checkpoint = _build_refresh_checkpoint(
             source_status=source_status,
             source_counts=source_counts,
@@ -1065,6 +1121,76 @@ async def picks_lab(
                 "parlay_quality_reasons": [],
             },
         }
+
+
+@router.get("/picks/diagnostics")
+async def get_picks_diagnostics() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "generated_at": _now_iso(),
+        "sources": _snapshot_source_diagnostics(),
+    }
+
+
+@router.post("/picks/diagnostics/retry")
+async def retry_picks_diagnostics(
+    source: str = Query("all", description="all|games_today|odds|trends|player_props"),
+) -> Dict[str, Any]:
+    s = str(source or "all").strip().lower()
+    allowed = {"all", "games_today", "odds", "trends", "player_props"}
+    if s not in allowed:
+        raise HTTPException(status_code=400, detail="invalid source")
+
+    async def run_games_today():
+        try:
+            games = await get_today_games()
+            _update_source_diag("games_today", status="ok" if games else "no_data", count=len(games or []), error="")
+        except Exception as e:
+            _update_source_diag("games_today", status="error", count=0, error=f"{type(e).__name__}: {e}")
+
+    def run_odds():
+        try:
+            odds = fetch_moneyline_odds(None, cache_ttl=0)
+            games = (odds.model_dump() if hasattr(odds, "model_dump") else odds).get("games", [])
+            _update_source_diag("odds", status="ok" if games else "no_data", count=len(games or []), error="")
+        except Exception as e:
+            _update_source_diag("odds", status="error", count=0, error=f"{type(e).__name__}: {e}")
+
+    def run_trends():
+        try:
+            if get_trends_summary is None:
+                _update_source_diag("trends", status="disabled", count=0, error="trends provider unavailable")
+                return
+            t = get_trends_summary()
+            pt = getattr(t, "player_trends", []) or []
+            tt = getattr(t, "team_trends", []) or []
+            count = len(pt) + len(tt)
+            _update_source_diag("trends", status="ok" if count > 0 else "no_data", count=count, error="")
+        except Exception as e:
+            _update_source_diag("trends", status="error", count=0, error=f"{type(e).__name__}: {e}")
+
+    def run_player_props():
+        try:
+            p = fetch_player_props_for_today(max_total=100)
+            _update_source_diag("player_props", status="ok" if p else "no_data", count=len(p or []), error="")
+        except Exception as e:
+            _update_source_diag("player_props", status="error", count=0, error=f"{type(e).__name__}: {e}")
+
+    if s in {"all", "games_today"}:
+        await run_games_today()
+    if s in {"all", "odds"}:
+        run_odds()
+    if s in {"all", "trends"}:
+        run_trends()
+    if s in {"all", "player_props"}:
+        run_player_props()
+
+    return {
+        "ok": True,
+        "retried": s,
+        "generated_at": _now_iso(),
+        "sources": _snapshot_source_diagnostics(),
+    }
 
 
 @router.post("/picks/track")

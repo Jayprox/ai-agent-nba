@@ -68,6 +68,8 @@ export default function PickLabPage() {
   const [sportsbookOdds, setSportsbookOdds] = useState("");
   const [performance, setPerformance] = useState(null);
   const [recentPicks, setRecentPicks] = useState([]);
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [diagLoading, setDiagLoading] = useState(false);
 
   const [filterPickType, setFilterPickType] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
@@ -123,6 +125,35 @@ export default function PickLabPage() {
       }
     } catch {
       // keep resilient
+    }
+  };
+
+  const fetchDiagnostics = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/nba/picks/diagnostics`);
+      if (!res.ok) return;
+      setDiagnostics(await res.json());
+    } catch {
+      // keep resilient
+    }
+  };
+
+  const retrySource = async (source) => {
+    setDiagLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/nba/picks/diagnostics/retry?source=${encodeURIComponent(source)}`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        setDiagnostics(await res.json());
+        setTrackMessage(`Retried source: ${source}`);
+      } else {
+        setTrackMessage(`Retry failed for ${source} (HTTP ${res.status})`);
+      }
+    } catch (e) {
+      setTrackMessage(`Retry failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setDiagLoading(false);
     }
   };
 
@@ -215,6 +246,10 @@ export default function PickLabPage() {
     fetchPerformance();
   }, [filterPickType, filterStatus, filterResult, filterDateFrom, filterDateTo]);
 
+  useEffect(() => {
+    fetchDiagnostics();
+  }, []);
+
   const recommendation = String(data?.decision?.recommendation || "pass").toUpperCase();
   const recColor = recommendation === "BET" ? "#22c55e" : recommendation === "LEAN" ? "#f59e0b" : "#ef4444";
 
@@ -303,6 +338,68 @@ export default function PickLabPage() {
             <ul style={{ marginTop: 0 }}>
               {(refreshCheckpoint?.pre_bet_checklist || []).map((r, idx) => <li key={idx}>{r}</li>)}
             </ul>
+          </>
+        )}
+      </div>
+
+      <div style={{ ...baseCard, marginBottom: 12 }}>
+        <h2 style={{ marginTop: 0 }}>Source Diagnostics</h2>
+        {!diagnostics ? (
+          <p style={{ color: "#93a4bf" }}>Loading diagnostics...</p>
+        ) : (
+          <>
+            <p style={{ color: "#cbd5e1", fontSize: 13, marginTop: 0 }}>
+              Snapshot: {diagnostics?.generated_at || "N/A"}
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8 }}>
+              {Object.entries(diagnostics?.sources || {}).map(([k, v]) => (
+                <div key={k} style={{ border: "1px solid #334155", borderRadius: 10, padding: 10, background: "#0b1220" }}>
+                  <div style={{ fontWeight: 800, marginBottom: 6 }}>{k}</div>
+                  <div style={{ fontSize: 12, color: "#cbd5e1" }}>
+                    status={v?.last_status} | count={v?.last_count}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#93a4bf" }}>
+                    last_success={v?.last_success_at || "never"}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#93a4bf" }}>
+                    last_attempt={v?.last_attempt_at || "never"}
+                  </div>
+                  {v?.last_error ? <div style={{ fontSize: 12, color: "#fca5a5", marginTop: 4 }}>error={v.last_error}</div> : null}
+                  <button
+                    onClick={() => retrySource(k)}
+                    disabled={diagLoading}
+                    style={{
+                      marginTop: 8,
+                      padding: "6px 8px",
+                      borderRadius: 8,
+                      border: "1px solid #334155",
+                      background: "#111827",
+                      color: "#e5e7eb",
+                      cursor: "pointer",
+                      fontWeight: 700,
+                    }}
+                  >
+                    Retry {k}
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={() => retrySource("all")}
+              disabled={diagLoading}
+              style={{
+                marginTop: 10,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid #1d4ed8",
+                background: "#1e3a8a",
+                color: "#fff",
+                cursor: "pointer",
+                fontWeight: 800,
+              }}
+            >
+              {diagLoading ? "Retrying..." : "Retry All Sources"}
+            </button>
           </>
         )}
       </div>
