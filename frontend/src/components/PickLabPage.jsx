@@ -200,6 +200,7 @@ export default function PickLabPage() {
   const unavailable = data?.data_quality?.unavailable_sources || [];
   const rationale = data?.decision?.rationale || [];
   const riskFlags = data?.decision?.risk_flags || [];
+  const refreshCheckpoint = data?.data_quality?.refresh_checkpoint || null;
   const parlayQualityScore = data?.decision?.parlay_quality_score;
   const parlayQualityLabel = data?.decision?.parlay_quality_label;
   const parlayQualityReasons = data?.decision?.parlay_quality_reasons || [];
@@ -298,6 +299,31 @@ export default function PickLabPage() {
           <div style={{ marginTop: 8, color: "#fca5a5", fontSize: 13 }}>
             Unavailable sources: {unavailable.join(", ")}
           </div>
+        )}
+      </div>
+
+      <div style={{ ...baseCard, marginBottom: 12 }}>
+        <h2 style={{ marginTop: 0 }}>Pre-Bet Refresh Checkpoint</h2>
+        {!refreshCheckpoint ? (
+          <p style={{ color: "#93a4bf" }}>No refresh checkpoint available.</p>
+        ) : (
+          <>
+            <p style={{ marginTop: 0, color: refreshCheckpoint?.is_stale ? "#fca5a5" : "#86efac" }}>
+              Status: {refreshCheckpoint?.is_stale ? "STALE / RECHECK REQUIRED" : "FRESH ENOUGH TO REVIEW"}
+            </p>
+            <p style={{ color: "#cbd5e1", fontSize: 13 }}>
+              Captured: {refreshCheckpoint?.captured_at || "N/A"} | Narrative generated: {refreshCheckpoint?.narrative_generated_at || "N/A"} | Cache used: {String(refreshCheckpoint?.cache_used)}
+            </p>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Stale Reasons</div>
+            <ul style={{ marginTop: 0 }}>
+              {(refreshCheckpoint?.stale_reasons || []).map((r, idx) => <li key={idx}>{r}</li>)}
+              {(refreshCheckpoint?.stale_reasons || []).length === 0 && <li>None detected.</li>}
+            </ul>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Pre-Bet Checklist</div>
+            <ul style={{ marginTop: 0 }}>
+              {(refreshCheckpoint?.pre_bet_checklist || []).map((r, idx) => <li key={idx}>{r}</li>)}
+            </ul>
+          </>
         )}
       </div>
 

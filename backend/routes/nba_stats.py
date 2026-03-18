@@ -710,6 +710,51 @@ def _decision_from_quality(
     }
 
 
+def _build_refresh_checkpoint(
+    *,
+    source_status: Dict[str, Dict[str, Any]],
+    source_counts: Dict[str, int],
+    cache_used: bool,
+    cache_expires_in_s: Optional[float],
+    generated_at: str,
+) -> Dict[str, Any]:
+    stale_reasons: List[str] = []
+    hard_stale_sources = {"odds", "games_today"}
+
+    for src, entry in source_status.items():
+        status = str((entry or {}).get("status") or "")
+        if status in {"error", "disabled"}:
+            stale_reasons.append(f"{src} source is {status}")
+        elif status == "no_data" and src in hard_stale_sources:
+            stale_reasons.append(f"{src} source has no_data")
+
+    if source_counts.get("odds_games", 0) == 0:
+        stale_reasons.append("odds slate is empty")
+
+    if cache_used and (cache_expires_in_s is not None) and cache_expires_in_s <= 0:
+        stale_reasons.append("cache is expired")
+
+    is_stale = len(stale_reasons) > 0
+
+    checklist = [
+        "Recheck current line at sportsbook before placing.",
+        "Confirm no late injury/rotation news changed the edge.",
+        "Avoid stacking highly correlated legs in the same parlay.",
+    ]
+    if is_stale:
+        checklist.insert(0, "Refresh data now: one or more core sources are stale/limited.")
+
+    return {
+        "captured_at": _now_iso(),
+        "narrative_generated_at": generated_at,
+        "cache_used": cache_used,
+        "cache_expires_in_s": cache_expires_in_s,
+        "is_stale": is_stale,
+        "stale_reasons": stale_reasons[:6],
+        "pre_bet_checklist": checklist[:5],
+    }
+
+
 @router.get("/offense/teams")
 async def offense_teams() -> Dict[str, Any]:
     live_error = ""
@@ -924,6 +969,9 @@ async def picks_lab(
         source_counts = source_counts if isinstance(source_counts, dict) else {}
         source_status = source_status if isinstance(source_status, dict) else {}
         soft_errors = soft_errors if isinstance(soft_errors, dict) else {}
+        cache_used = bool(meta.get("cache_used"))
+        cache_expires_in_s_raw = _to_float_or_none(meta.get("cache_expires_in_s"))
+        narrative_generated_at = str((base.get("summary") or {}).get("metadata", {}).get("generated_at") or "")
 
         decision_block = _decision_from_quality(
             pick_type=normalized_pick_type,
@@ -935,6 +983,13 @@ async def picks_lab(
         )
 
         unavailable_sources = [k for k, v in source_status.items() if str((v or {}).get("status")) in {"no_data", "error", "disabled"}]
+        refresh_checkpoint = _build_refresh_checkpoint(
+            source_status=source_status,
+            source_counts=source_counts,
+            cache_used=cache_used,
+            cache_expires_in_s=cache_expires_in_s_raw,
+            generated_at=narrative_generated_at,
+        )
 
         return {
             "ok": True,
@@ -954,6 +1009,7 @@ async def picks_lab(
                 "source_status": source_status,
                 "unavailable_sources": unavailable_sources,
                 "soft_errors": soft_errors,
+                "refresh_checkpoint": refresh_checkpoint,
             },
             "decision": decision_block,
         }
@@ -976,6 +1032,15 @@ async def picks_lab(
                 "source_status": {},
                 "unavailable_sources": ["system"],
                 "soft_errors": {"system": f"picks_lab fallback: {type(e).__name__}: {e}"},
+                "refresh_checkpoint": {
+                    "captured_at": _now_iso(),
+                    "narrative_generated_at": "",
+                    "cache_used": False,
+                    "cache_expires_in_s": None,
+                    "is_stale": True,
+                    "stale_reasons": ["system: degraded mode"],
+                    "pre_bet_checklist": ["Refresh data now before placing any bet."],
+                },
             },
             "decision": {
                 "recommendation": "pass",
