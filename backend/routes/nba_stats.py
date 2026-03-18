@@ -584,6 +584,8 @@ def _risk_flag_text(source: str, entry: Dict[str, Any]) -> str:
 def _decision_from_quality(
     *,
     pick_type: str,
+    legs: int,
+    odds_band: str,
     risk_profile: str,
     source_counts: Dict[str, int],
     source_status: Dict[str, Dict[str, Any]],
@@ -639,10 +641,72 @@ def _decision_from_quality(
     if pick_type == "lotto_parlay":
         flags.append("High variance profile: expected hit rate is materially lower.")
 
+    parlay_quality_score: Optional[int] = None
+    parlay_quality_reasons: List[str] = []
+    parlay_quality_label: Optional[str] = None
+
+    if pick_type in {"smart_parlay", "lotto_parlay"}:
+        score = 78 if pick_type == "smart_parlay" else 56
+
+        if legs >= 6:
+            score -= 28
+            parlay_quality_reasons.append("High leg count increases failure paths and hidden correlation.")
+        elif legs >= 4:
+            score -= 14
+            parlay_quality_reasons.append("Moderate leg count increases variance; require stronger edge per leg.")
+        elif legs <= 3 and pick_type == "smart_parlay":
+            score += 6
+            parlay_quality_reasons.append("Compact leg count helps preserve parlay quality.")
+
+        if source_counts.get("games_today", 0) == 0:
+            score -= 15
+            parlay_quality_reasons.append("No games from primary schedule source; cross-source confidence is reduced.")
+        if source_counts.get("odds_games", 0) < 3:
+            score -= 12
+            parlay_quality_reasons.append("Limited odds slate reduces line-shopping and edge confirmation.")
+        if source_counts.get("player_props", 0) == 0:
+            score -= 10
+            parlay_quality_reasons.append("No player props context; less signal depth for leg validation.")
+        if source_counts.get("player_trends", 0) + source_counts.get("team_trends", 0) == 0:
+            score -= 10
+            parlay_quality_reasons.append("No trends context available for leg-level confidence checks.")
+        if odds_band == "plus_1000_plus":
+            score -= 12
+            parlay_quality_reasons.append("Long-odds profile materially lowers hit probability.")
+
+        for src in ("games_today", "odds", "trends", "player_props"):
+            entry = source_status.get(src) or {}
+            if str(entry.get("status")) in {"error", "disabled"}:
+                score -= 8
+                parlay_quality_reasons.append(f"{src} source is {entry.get('status')}; confidence downgraded.")
+
+        score = max(0, min(100, score))
+        parlay_quality_score = int(score)
+        if score >= 80:
+            parlay_quality_label = "strong"
+        elif score >= 65:
+            parlay_quality_label = "solid"
+        elif score >= 45:
+            parlay_quality_label = "fragile"
+        else:
+            parlay_quality_label = "weak"
+
+        flags.append(f"Parlay quality: {parlay_quality_label} ({parlay_quality_score}/100).")
+
+        if parlay_quality_score < 45:
+            decision = "pass"
+            rationale.append("Parlay quality is weak under current constraints; pass is recommended.")
+        elif parlay_quality_score < 60 and decision == "bet":
+            decision = "lean"
+            rationale.append("Parlay quality is fragile; downgrade from bet to lean.")
+
     return {
         "recommendation": decision,
         "rationale": rationale[:5],
         "risk_flags": flags[:8],
+        "parlay_quality_score": parlay_quality_score,
+        "parlay_quality_label": parlay_quality_label,
+        "parlay_quality_reasons": parlay_quality_reasons[:6],
     }
 
 
@@ -863,6 +927,8 @@ async def picks_lab(
 
         decision_block = _decision_from_quality(
             pick_type=normalized_pick_type,
+            legs=legs,
+            odds_band=normalized_odds_band,
             risk_profile=normalized_risk,
             source_counts=source_counts,
             source_status=source_status,
@@ -915,6 +981,9 @@ async def picks_lab(
                 "recommendation": "pass",
                 "rationale": ["Pick lab could not load full data inputs; safest action is pass."],
                 "risk_flags": ["system: degraded mode"],
+                "parlay_quality_score": None,
+                "parlay_quality_label": None,
+                "parlay_quality_reasons": [],
             },
         }
 

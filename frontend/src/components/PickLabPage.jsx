@@ -159,6 +159,10 @@ export default function PickLabPage() {
   const unavailable = data?.data_quality?.unavailable_sources || [];
   const rationale = data?.decision?.rationale || [];
   const riskFlags = data?.decision?.risk_flags || [];
+  const parlayQualityScore = data?.decision?.parlay_quality_score;
+  const parlayQualityLabel = data?.decision?.parlay_quality_label;
+  const parlayQualityReasons = data?.decision?.parlay_quality_reasons || [];
+  const isParlay = pickType === "smart_parlay" || pickType === "lotto_parlay";
 
   return (
     <div style={{ color: "#e5e7eb", padding: "16px", maxWidth: 1160, margin: "0 auto" }}>
@@ -274,6 +278,18 @@ export default function PickLabPage() {
           {riskFlags.map((r, idx) => <li key={idx}>{r}</li>)}
           {riskFlags.length === 0 && <li>No explicit flags returned.</li>}
         </ul>
+
+        {isParlay && (
+          <div style={{ marginTop: 10, border: "1px solid #334155", borderRadius: 10, padding: 10, background: "#0b1220" }}>
+            <div style={{ fontWeight: 800, marginBottom: 6 }}>
+              Parlay Quality Score: {parlayQualityScore ?? "N/A"}{parlayQualityLabel ? ` (${parlayQualityLabel})` : ""}
+            </div>
+            <ul style={{ margin: 0 }}>
+              {parlayQualityReasons.map((r, idx) => <li key={idx}>{r}</li>)}
+              {parlayQualityReasons.length === 0 && <li>No additional parlay guardrail notes.</li>}
+            </ul>
+          </div>
+        )}
 
         <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end" }}>
           <label>
