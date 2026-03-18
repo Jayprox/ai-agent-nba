@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import uuid
+import threading
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 
 from agents.team_offense_agent.fetch_offense import fetch_team_offense_data
 from agents.team_defense_agent.fetch_defense import fetch_team_defense_data
@@ -17,6 +19,8 @@ from common.odds_utils import fetch_moneyline_odds
 from common.player_props_utils import fetch_player_props_for_today
 
 router = APIRouter(prefix="/nba", tags=["NBA Stats"])
+_PICKS_STORE_PATH = Path(__file__).resolve().parents[1] / "data" / "picks_tracking.json"
+_PICKS_LOCK = threading.Lock()
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -40,6 +44,53 @@ def _props_based_trend(points_line: Optional[float]) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _to_float_or_none(value: Any) -> Optional[float]:
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _ensure_pick_store() -> None:
+    _PICKS_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not _PICKS_STORE_PATH.exists():
+        _PICKS_STORE_PATH.write_text("[]", encoding="utf-8")
+
+
+def _load_picks() -> List[Dict[str, Any]]:
+    _ensure_pick_store()
+    try:
+        raw = _PICKS_STORE_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_picks(rows: List[Dict[str, Any]]) -> None:
+    _ensure_pick_store()
+    _PICKS_STORE_PATH.write_text(json.dumps(rows, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def _calc_clv(open_odds: Optional[float], close_odds: Optional[float]) -> Optional[float]:
+    if open_odds is None or close_odds is None:
+        return None
+    return round(close_odds - open_odds, 4)
+
+
+def _calc_pnl_units(result: str, stake_units: float, odds_decimal: Optional[float]) -> float:
+    r = str(result or "").lower().strip()
+    if r == "win":
+        if odds_decimal and odds_decimal > 1.0:
+            return round(stake_units * (odds_decimal - 1.0), 4)
+        return round(stake_units, 4)
+    if r == "loss":
+        return round(-stake_units, 4)
+    return 0.0
 
 
 def _decimal_to_win_prob(decimal_price: Optional[float]) -> Optional[float]:
@@ -512,6 +563,12 @@ def _normalize_risk_profile(value: str) -> str:
     return v if v in allowed else "standard"
 
 
+def _normalize_result(value: str) -> str:
+    v = str(value or "").strip().lower()
+    allowed = {"win", "loss", "push"}
+    return v if v in allowed else "push"
+
+
 def _risk_flag_text(source: str, entry: Dict[str, Any]) -> str:
     status = str(entry.get("status") or "unknown")
     if status in {"error", "disabled"}:
@@ -860,3 +917,142 @@ async def picks_lab(
                 "risk_flags": ["system: degraded mode"],
             },
         }
+
+
+@router.post("/picks/track")
+async def track_pick(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+    constraints = payload.get("constraints") or {}
+    decision = payload.get("decision") or {}
+    data_quality = payload.get("data_quality") or {}
+
+    pick_type = _normalize_pick_type(str(constraints.get("pick_type") or payload.get("pick_type") or "straight"))
+    odds_band = _normalize_odds_band(str(constraints.get("odds_band") or payload.get("odds_band") or "minus_100_to_plus_500"))
+    risk_profile = _normalize_risk_profile(str(constraints.get("risk_profile") or payload.get("risk_profile") or "standard"))
+    legs = int(constraints.get("legs") or payload.get("legs") or 1)
+    recommendation = str(decision.get("recommendation") or payload.get("recommendation") or "pass").lower()
+    sportsbook_odds_decimal = _to_float_or_none(payload.get("sportsbook_odds_decimal"))
+
+    row = {
+        "pick_id": str(uuid.uuid4()),
+        "created_at": _now_iso(),
+        "status": "open",
+        "pick_type": pick_type,
+        "legs": max(1, min(12, legs)),
+        "odds_band": odds_band,
+        "risk_profile": risk_profile,
+        "recommendation": recommendation,
+        "sportsbook_odds_decimal": sportsbook_odds_decimal,
+        "closing_odds_decimal": None,
+        "result": None,
+        "stake_units": 1.0,
+        "pnl_units": None,
+        "clv": None,
+        "rationale": list(decision.get("rationale") or payload.get("rationale") or []),
+        "risk_flags": list(decision.get("risk_flags") or payload.get("risk_flags") or []),
+        "data_quality": {
+            "source_counts": (data_quality.get("source_counts") or {}),
+            "source_status": (data_quality.get("source_status") or {}),
+        },
+    }
+
+    with _PICKS_LOCK:
+        rows = _load_picks()
+        rows.append(row)
+        _save_picks(rows)
+
+    return {"ok": True, "pick": row}
+
+
+@router.patch("/picks/{pick_id}/settle")
+async def settle_pick(
+    pick_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
+    result = _normalize_result(str(payload.get("result") or "push"))
+    closing_odds = _to_float_or_none(payload.get("closing_odds_decimal"))
+    stake_units = _to_float_or_none(payload.get("stake_units")) or 1.0
+
+    with _PICKS_LOCK:
+        rows = _load_picks()
+        idx = next((i for i, r in enumerate(rows) if str(r.get("pick_id")) == pick_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="pick_id not found")
+
+        row = dict(rows[idx])
+        row["status"] = "settled"
+        row["settled_at"] = _now_iso()
+        row["result"] = result
+        row["stake_units"] = float(stake_units)
+        row["closing_odds_decimal"] = closing_odds
+        open_odds = _to_float_or_none(row.get("sportsbook_odds_decimal"))
+        row["clv"] = _calc_clv(open_odds, closing_odds)
+        row["pnl_units"] = _calc_pnl_units(result, float(stake_units), open_odds)
+
+        rows[idx] = row
+        _save_picks(rows)
+
+    return {"ok": True, "pick": row}
+
+
+@router.get("/picks/tracked")
+async def list_tracked_picks(
+    limit: int = Query(20, ge=1, le=200),
+    status: Optional[str] = Query(None),
+    pick_type: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    with _PICKS_LOCK:
+        rows = _load_picks()
+
+    filtered = []
+    for r in rows:
+        if status and str(r.get("status")) != status:
+            continue
+        if pick_type and str(r.get("pick_type")) != pick_type:
+            continue
+        filtered.append(r)
+
+    filtered.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+    return {"ok": True, "count": len(filtered[:limit]), "picks": filtered[:limit]}
+
+
+@router.get("/picks/performance")
+async def picks_performance() -> Dict[str, Any]:
+    with _PICKS_LOCK:
+        rows = _load_picks()
+
+    settled = [r for r in rows if str(r.get("status")) == "settled"]
+
+    def summarize(group_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        wins = sum(1 for r in group_rows if str(r.get("result")) == "win")
+        losses = sum(1 for r in group_rows if str(r.get("result")) == "loss")
+        pushes = sum(1 for r in group_rows if str(r.get("result")) == "push")
+        stake = sum(float(r.get("stake_units") or 0.0) for r in group_rows)
+        pnl = sum(float(r.get("pnl_units") or 0.0) for r in group_rows)
+        clv_rows = [float(r.get("clv")) for r in group_rows if r.get("clv") is not None]
+        denom = wins + losses
+        win_rate = round((wins / denom), 4) if denom > 0 else None
+        roi = round((pnl / stake), 4) if stake > 0 else None
+        avg_clv = round(sum(clv_rows) / len(clv_rows), 4) if clv_rows else None
+        return {
+            "settled": len(group_rows),
+            "wins": wins,
+            "losses": losses,
+            "pushes": pushes,
+            "win_rate": win_rate,
+            "roi": roi,
+            "pnl_units": round(pnl, 4),
+            "avg_clv": avg_clv,
+        }
+
+    by_type: Dict[str, Dict[str, Any]] = {}
+    for ptype in {"straight", "smart_parlay", "lotto_parlay", "sleeper"}:
+        group = [r for r in settled if str(r.get("pick_type")) == ptype]
+        by_type[ptype] = summarize(group)
+
+    return {
+        "ok": True,
+        "generated_at": _now_iso(),
+        "overall": summarize(settled),
+        "by_pick_type": by_type,
+        "open_picks": sum(1 for r in rows if str(r.get("status")) == "open"),
+    }

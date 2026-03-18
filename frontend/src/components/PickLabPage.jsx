@@ -59,8 +59,13 @@ export default function PickLabPage() {
   const [oddsBand, setOddsBand] = useState("minus_100_to_plus_500");
   const [riskProfile, setRiskProfile] = useState("standard");
   const [loading, setLoading] = useState(false);
+  const [trackLoading, setTrackLoading] = useState(false);
   const [error, setError] = useState("");
+  const [trackMessage, setTrackMessage] = useState("");
   const [data, setData] = useState(null);
+  const [sportsbookOdds, setSportsbookOdds] = useState("");
+  const [performance, setPerformance] = useState(null);
+  const [recentPicks, setRecentPicks] = useState([]);
 
   const query = useMemo(() => {
     const p = new URLSearchParams();
@@ -89,9 +94,57 @@ export default function PickLabPage() {
     }
   };
 
+  const fetchPerformance = async () => {
+    try {
+      const [perfRes, recentRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/nba/picks/performance`),
+        fetch(`${API_BASE_URL}/nba/picks/tracked?limit=5`),
+      ]);
+      if (perfRes.ok) setPerformance(await perfRes.json());
+      if (recentRes.ok) {
+        const r = await recentRes.json();
+        setRecentPicks(r?.picks || []);
+      }
+    } catch {
+      // Keep UI resilient; do not block main page on tracking panel failures.
+    }
+  };
+
+  const trackCurrentPick = async () => {
+    if (!data) return;
+    setTrackLoading(true);
+    setTrackMessage("");
+    try {
+      const payload = {
+        constraints: data?.constraints || {},
+        decision: data?.decision || {},
+        data_quality: data?.data_quality || {},
+        sportsbook_odds_decimal: sportsbookOdds === "" ? null : Number(sportsbookOdds),
+      };
+      const res = await fetch(`${API_BASE_URL}/nba/picks/track`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const saved = await res.json();
+      const pickId = saved?.pick?.pick_id;
+      setTrackMessage(pickId ? `Tracked pick: ${pickId}` : "Pick tracked.");
+      await fetchPerformance();
+    } catch (e) {
+      setTrackMessage(`Track failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setTrackLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchPickLab();
   }, [query]);
+
+  useEffect(() => {
+    fetchPerformance();
+  }, []);
 
   const recommendation = String(data?.decision?.recommendation || "pass").toUpperCase();
   const recColor =
@@ -221,6 +274,73 @@ export default function PickLabPage() {
           {riskFlags.map((r, idx) => <li key={idx}>{r}</li>)}
           {riskFlags.length === 0 && <li>No explicit flags returned.</li>}
         </ul>
+
+        <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end" }}>
+          <label>
+            <div style={{ marginBottom: 4, color: "#93c5fd", fontWeight: 700, fontSize: 12 }}>
+              Sportsbook Odds (decimal)
+            </div>
+            <input
+              type="number"
+              step="0.01"
+              min="1.01"
+              value={sportsbookOdds}
+              onChange={(e) => setSportsbookOdds(e.target.value)}
+              style={{ padding: "8px 10px", borderRadius: 8, background: "#0b1220", color: "#fff", border: "1px solid #334155" }}
+              placeholder="e.g. 1.91"
+            />
+          </label>
+          <button
+            onClick={trackCurrentPick}
+            disabled={trackLoading || !data}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px solid #16a34a",
+              background: trackLoading ? "#166534" : "#15803d",
+              color: "#fff",
+              fontWeight: 800,
+              cursor: "pointer",
+            }}
+          >
+            {trackLoading ? "Tracking..." : "Track This Pick"}
+          </button>
+          {trackMessage && <span style={{ color: "#cbd5e1", fontSize: 13 }}>{trackMessage}</span>}
+        </div>
+      </div>
+
+      <div style={{ ...baseCard, marginBottom: 12 }}>
+        <h2 style={{ marginTop: 0 }}>Post-Bet Review Snapshot</h2>
+        {!performance ? (
+          <p style={{ color: "#93a4bf" }}>Loading performance...</p>
+        ) : (
+          <>
+            <p style={{ marginTop: 0, color: "#cbd5e1" }}>
+              Settled: {performance?.overall?.settled ?? 0} | Win rate: {performance?.overall?.win_rate ?? "N/A"} | ROI: {performance?.overall?.roi ?? "N/A"} | PnL: {performance?.overall?.pnl_units ?? 0}u
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
+              {Object.entries(performance?.by_pick_type || {}).map(([k, v]) => (
+                <div key={k} style={{ border: "1px solid #334155", borderRadius: 10, padding: 10, background: "#0b1220" }}>
+                  <div style={{ fontWeight: 800, marginBottom: 6 }}>{k}</div>
+                  <div style={{ fontSize: 13, color: "#cbd5e1" }}>
+                    settled={v?.settled ?? 0}, win_rate={v?.win_rate ?? "N/A"}, roi={v?.roi ?? "N/A"}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>Recent Picks</div>
+              <ul style={{ marginTop: 0 }}>
+                {recentPicks.map((p) => (
+                  <li key={p.pick_id}>
+                    {p.pick_type} | {p.recommendation} | status={p.status}
+                  </li>
+                ))}
+                {recentPicks.length === 0 && <li>No tracked picks yet.</li>}
+              </ul>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -1,0 +1,27 @@
+[
+  {
+    "pick_id": "54a7f6fb-a564-4f21-bd9b-b6fdadfc0816",
+    "created_at": "2026-03-18T06:47:29.581678+00:00",
+    "status": "settled",
+    "pick_type": "straight",
+    "legs": 1,
+    "odds_band": "minus_100_to_plus_500",
+    "risk_profile": "standard",
+    "recommendation": "lean",
+    "sportsbook_odds_decimal": 1.95,
+    "closing_odds_decimal": 1.85,
+    "result": "win",
+    "stake_units": 1.0,
+    "pnl_units": 0.95,
+    "clv": -0.1,
+    "rationale": [
+      "test"
+    ],
+    "risk_flags": [],
+    "data_quality": {
+      "source_counts": {},
+      "source_status": {}
+    },
+    "settled_at": "2026-03-18T06:47:29.593498+00:00"
+  }
+]
