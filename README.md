@@ -15,7 +15,7 @@ Status (2026-10-15): design agreed, build not started.
 - docs/handoff.md — current state, decisions log, next steps. Updated after every decision.
 - KICKOFF_PROMPT.md — paste into a fresh chat to start or resume the build.
 - old/ — the previous contents of this repo (the earlier ai-agent-nba app: Python backend, React frontend, Azure deployment), moved here on 2026-10-15. Not part of the new app; do not reuse it unless JD says so.
-- .github/ — the old app's CI and uptime workflows, left at the root (GitHub only runs workflows from here). Their paths still point at the old layout; see docs/handoff.md.
+- old/.github/ — the old app's CI, uptime and Azure deploy workflows, retired on 2026-10-15 by moving them out of the root (GitHub only runs workflows from the root .github/). A new .github/ can be added for this app when it needs CI.
 
 Until the build starts, the working copies of these docs also live in the Claude project "ai-application-nba-ios" under claude/outside-agents-*.md. Once the build starts in this repo, the files here are the source of truth.
 
