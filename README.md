@@ -2,7 +2,7 @@
 
 A standalone web app that adds a simulated probability, a confidence tier (Lean / Solid / Strong) and written reasoning to NBA player props, using the Chalk That NBA API as its only source of stats and lines. One user (JD). A research tool, not betting advice.
 
-Status (2026-10-15): design agreed, build not started.
+Status (2026-10-15): design agreed and pushed, build not started (no code yet; the next step is proposing the root structure).
 
 ## How it works, in four lines
 - Numbers are code: the simulation (row-bootstrap Monte Carlo with minutes scaling), probabilities, edge and confidence. AI only proposes bounded adjustments from a fixed menu and writes explanations; it never writes a number that is not in its input.
@@ -20,4 +20,4 @@ Status (2026-10-15): design agreed, build not started.
 Until the build starts, the working copies of these docs also live in the Claude project "ai-application-nba-ios" under claude/outside-agents-*.md. Once the build starts in this repo, the files here are the source of truth.
 
 ## Related
-Chalk That NBA (the data source, numbers-only): /Users/jayprox_pro/Documents/Projects/git/ai-application-nba
+Chalk That NBA (the data source, numbers-only; publicly named Chalk That Hardwood, repo and internal names unchanged): /Users/jayprox_pro/Documents/Projects/git/ai-application-nba
