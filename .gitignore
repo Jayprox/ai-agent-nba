@@ -85,3 +85,6 @@ coverage/
 # ----------------------------
 Desktop.ini
 Thumbs.db
+
+# third-party app screenshots used for design research (do not commit)
+screenshots_research/
